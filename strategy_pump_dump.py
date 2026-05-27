@@ -1,5 +1,5 @@
 """
-strategy_pump_dump.py — Pump & Dump Short  (v2 + ATR TP, 100% exit)
+strategy_pump_dump.py — Pump & Dump Short  (v2 + ATR TP, 100% exit, fast 5% risk)
 
 ÆNDRINGER FRA v2:
   1. TP = 1× ATR under entry  (ramtes 85% af gangene i test)
@@ -8,6 +8,7 @@ strategy_pump_dump.py — Pump & Dump Short  (v2 + ATR TP, 100% exit)
 ALT ANDET er v2 uændret:
   - pump_pct=20, pump_window=24t, delay=2t
   - SL=8% fast — ingen trailing stop
+  - Position sizing: fast 5% risiko af kapital pr. trade
   - max_hold=48t, rsi_max=80, 1h interval
 
 Kør:
@@ -23,6 +24,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+from grade_signal import grade_signal, GRADE_RISK
 from utils import (
     fetch_ohlcv, fetch_top_altcoins,
     rsi, atr,
@@ -34,14 +36,14 @@ from utils import (
 #  Parametre — v2 + TP-ændring
 # ─────────────────────────────────────────────
 DEFAULTS = {
-    "pump_pct":         20,
+    "pump_pct":         15,
     "pump_window_h":    24,
     "entry_delay_h":    2,
-    "stop_loss_pct":    8,     # Fast SL — ingen trailing
-    "tp_atr":           1.0,   # TP = 1× ATR under entry  ← eneste ændring
+    "stop_loss_pct":    3,     # Fast SL — ingen trailing
+    "tp_atr":          2,   # TP = 1× ATR under entry  ← eneste ændring
     "max_hold_h":       48,
-    "risk_per_trade":   0.02,
-    "initial_capital":  10_000,
+    "risk_per_trade":   0.05,   # 5% fast risiko pr. trade
+    "initial_capital":  100,
     "backtest_days":    180,
     "interval":         "1h",
     "fee_pct":          0.06,
@@ -136,14 +138,35 @@ def backtest_pump_dump(symbol: str, params: dict) -> tuple[list, pd.DataFrame]:
                     and row["close"] < prev["high"]):
 
                 sl_pct      = params.get("stop_loss_pct", params.get("stop_loss_atr", 8)) / 100
-
-                # ── Kelly position sizing ──
-                k_frac   = params.get("kelly_fraction", params["risk_per_trade"])
-                risk_amt = capital * k_frac
                 entry_price = row["close"] * (1 + costs_pct / 2)
                 sl_price    = entry_price * (1 + sl_pct)
                 tp_price    = entry_price - row["atr_v"] * params["tp_atr"]
-                size        = risk_amt / (entry_price * sl_pct)
+
+                # ── Setup gradering A/B/C ──
+                can      = max(1, int(params["pump_window_h"] / ih))
+                roll_hi  = df["high"].rolling(can).max().iloc[i - delay_c]
+                roll_lo  = df["low"].rolling(can).min().iloc[i - delay_c]
+                avg_vol  = df["volume"].rolling(can).mean().iloc[i - delay_c]
+                pump_vol = df["volume"].iloc[i - delay_c]
+                pump_pct_v = (roll_hi - roll_lo) / roll_lo * 100 if roll_lo > 0 else 0
+
+                grade_info = grade_signal(
+                    pump_pct    = pump_pct_v,
+                    rsi         = row["rsi_v"],
+                    entry_price = entry_price,
+                    pump_high   = roll_hi,
+                    atr         = row["atr_v"],
+                    avg_volume  = avg_vol if not pd.isna(avg_vol) else 1,
+                    pump_volume = pump_vol,
+                )
+
+                # ── KUN A-setups handles ──
+                if grade_info["grade"] != "A":
+                    continue
+
+                # ── Dynamisk position sizing: 7% af AKTUEL kapital ──
+                risk_amt = capital * 0.07
+                size     = risk_amt / (entry_price * sl_pct)
 
                 in_trade   = True
                 entry_idx  = i
@@ -153,6 +176,9 @@ def backtest_pump_dump(symbol: str, params: dict) -> tuple[list, pd.DataFrame]:
                     "entry_price": entry_price,
                     "entry_time":  ts,
                     "size":        size,
+                    "grade":       grade_info["grade"],
+                    "grade_score": grade_info["score"],
+                    "risk_usd":    round(risk_amt, 4),
                     "tp_pct":      (entry_price - tp_price) / entry_price * 100,
                 }
 
@@ -526,14 +552,9 @@ def main():
     parser.add_argument("--interval",    type=str,   default=DEFAULTS["interval"],
                         choices=["15m","30m","1h","2h","4h"])
     parser.add_argument("--capital",     type=float, default=DEFAULTS["initial_capital"])
-    parser.add_argument("--risk",        type=float, default=DEFAULTS["risk_per_trade"])
+    parser.add_argument("--risk",        type=float, default=DEFAULTS["risk_per_trade"],
+                        help="Risiko pr. trade som andel af kapital (default 0.05 = 5%%)")
     parser.add_argument("--no_vol",       action="store_true")
-    parser.add_argument("--kelly",         type=float, default=0.5,
-                        help="Kelly fraction: 0.5=half Kelly (anbefalet), 1.0=full Kelly")
-    parser.add_argument("--no_kelly",      action="store_true",
-                        help="Brug fast --risk i stedet for Kelly sizing")
-    parser.add_argument("--kelly_window",  type=int, default=20,
-                        help="Rullende vindue til adaptiv Kelly beregning")
     parser.add_argument("--smart_filter",  action="store_true",
                         help="Filtrer coins ud fra faktor-analyse (MC, 30d trend, vol/MC, supply)")
     parser.add_argument("--mc_min",        type=float, default=SMART_FILTER_DEFAULTS["mc_min"])
@@ -563,11 +584,6 @@ def main():
         "volume_filter":    not args.no_vol,
         "min_pump_candles": DEFAULTS["min_pump_candles"],
         "top_n":            args.top,
-        # Kelly — sættes til fast risk hvis --no_kelly
-        "kelly_fraction":   args.risk if args.no_kelly else None,
-        "kelly_frac_mult":  args.kelly,
-        "kelly_window":     args.kelly_window,
-        "use_kelly":        not args.no_kelly,
     }
 
     if args.symbols:
@@ -601,41 +617,7 @@ def main():
     print(f"\n  pump≥{params['pump_pct']}%  TP={params['tp_atr']}×ATR"
           f"  SL={params['stop_loss_pct']}%  hold≤{params['max_hold_h']}t"
           f"  {params['interval']}")
-    if params["use_kelly"]:
-        print(f"  Position sizing: {'Half' if args.kelly==0.5 else ''}Kelly "
-              f"(fraction={args.kelly}, rullende vindue={args.kelly_window})\n")
-    else:
-        print(f"  Position sizing: fast {args.risk*100:.1f}% pr. trade\n")
-
-    # ── Første pass: kør med fast risk for at beregne initial Kelly ──
-    # Kelly kræver historik — vi bruger et warm-up pass på 30 dage
-    if params["use_kelly"]:
-        print("  Beregner initial Kelly fra warm-up pass (30 dage)...")
-        warmup_params = {**params, "backtest_days": 30,
-                         "kelly_fraction": args.risk, "use_kelly": False}
-        warmup_trades = []
-        for sym in symbols[:min(10, len(symbols))]:
-            try:
-                t, _ = backtest_pump_dump(sym, warmup_params)
-                warmup_trades.extend(t)
-                time.sleep(0.1)
-            except Exception:
-                pass
-
-        if warmup_trades:
-            wt_pnls  = [t["pnl"] for t in warmup_trades]
-            wt_wins  = [p for p in wt_pnls if p > 0]
-            wt_loss  = [p for p in wt_pnls if p < 0]
-            init_wr  = len(wt_wins) / len(wt_pnls) if wt_pnls else 0.5
-            init_aw  = np.mean(wt_wins)  if wt_wins  else 50
-            init_al  = abs(np.mean(wt_loss)) if wt_loss else 50
-            init_k   = kelly_fraction(init_wr, init_aw, init_al, args.kelly)
-            print(f"  Initial Kelly: {init_k*100:.2f}%  "
-                  f"(WR={init_wr*100:.1f}% W={init_aw:.0f} L={init_al:.0f})\n")
-            params["kelly_fraction"] = init_k
-        else:
-            params["kelly_fraction"] = args.risk
-            print(f"  Ikke nok warm-up data — bruger {args.risk*100:.1f}%\n")
+    print(f"  Position sizing: KUN A-setups → 7% af aktuel kapital (dynamisk)\n")
 
     all_trades = []
     for sym in symbols:
@@ -667,35 +649,6 @@ def main():
     )
     print(reason_breakdown(all_trades))
     print(symbol_breakdown(all_trades))
-
-    # ── Kelly opsummering ──
-    if params["use_kelly"] and all_trades:
-        pnls   = [t["pnl"] for t in all_trades]
-        wins   = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
-        wr     = len(wins) / len(pnls)
-        aw     = np.mean(wins)        if wins   else 0
-        al     = abs(np.mean(losses)) if losses else 0
-        fk     = kelly_fraction(wr, aw, al, fraction=1.0)
-        hk     = kelly_fraction(wr, aw, al, fraction=0.5)
-        qk     = kelly_fraction(wr, aw, al, fraction=0.25)
-        w = 56
-        print(f"\n{'═'*w}")
-        print(f"  KELLY POSITION SIZING — baseret på backtest")
-        print(f"{'═'*w}")
-        print(f"  Win rate    : {wr*100:.1f}%")
-        print(f"  Gns. gevinst: ${aw:.2f}")
-        print(f"  Gns. tab    : ${al:.2f}")
-        print(f"  Odds (b)    : {aw/al:.2f}:1")
-        print(f"{'─'*w}")
-        print(f"  Full Kelly  : {fk*100:.2f}%  per trade  (max varians)")
-        print(f"  Half Kelly  : {hk*100:.2f}%  per trade  ← anbefalet")
-        print(f"  Quarter K.  : {qk*100:.2f}%  per trade  (konservativ)")
-        print(f"{'─'*w}")
-        print(f"  Eksempel ($10.000 kapital):")
-        print(f"    Half Kelly risikerer ${10000*hk:,.0f} pr. trade")
-        print(f"    → Position størrelse: ${10000*hk/(params['stop_loss_pct']/100):,.0f}")
-        print(f"{'═'*w}\n")
 
     # Gem stats til live_scanner
     if args.save_stats:
