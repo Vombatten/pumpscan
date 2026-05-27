@@ -169,7 +169,7 @@ def api_signals():
         **state,
         "params":PARAMS,"kelly_pct":round(calc_kelly(STATS)*100,2),
         "capital":PARAMS["capital"],
-        "tracker_stats":tr_stats,
+        "tracker_stats":tr_stats,"active_signals_taken":[s for s in (tracker.get_active() if tracker else []) if s.get("taken")],"active_signals_all":tracker.get_active() if tracker else [],
         "active_signals":active,
     })
 
@@ -182,6 +182,27 @@ def api_history():
 def api_scan():
     threading.Thread(target=run_scan,daemon=True).start()
     return jsonify({"status":"ok"})
+
+
+@app.route("/api/take/<path:key>", methods=["POST"])
+def api_take(key):
+    d = request.json or {}
+    taken = d.get("taken", True)
+    if tracker: tracker.set_taken(key, taken)
+    return jsonify({"ok": True, "taken": taken})
+
+@app.route("/api/outcome/<path:key>", methods=["POST"])
+def api_outcome(key):
+    d = request.json or {}
+    outcome = d.get("outcome")  # "WIN", "LOSS" eller None
+    if tracker: tracker.set_manual_outcome(key, outcome)
+    return jsonify({"ok": True, "outcome": outcome})
+
+@app.route("/api/all")
+def api_all():
+    n = int(request.args.get("n", 100))
+    sigs = tracker.get_all(n) if tracker else []
+    return jsonify({"signals": sigs})
 
 @app.route("/api/settings",methods=["POST"])
 def api_settings():
@@ -380,6 +401,29 @@ padding:60px 24px;text-align:center;gap:12px}
 border-radius:50%;animation:rot .7s linear infinite}
 @keyframes rot{to{transform:rotate(360deg)}}
 .stxt{font-size:12px;color:var(--txt3);font-family:var(--mono);text-align:center;line-height:1.6}
+
+.take-row{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--bdr);background:rgba(0,0,0,.15)}
+.take-lbl{font-size:12px;font-weight:700;color:var(--txt2);flex:1}
+.take-toggle{display:flex;gap:6px}
+.take-btn{font-size:11px;font-weight:700;padding:5px 13px;border-radius:8px;border:1px solid;cursor:pointer;font-family:var(--sans);transition:all .15s}
+.take-btn.yes{background:var(--g-dim);color:var(--g);border-color:rgba(0,214,143,.3)}
+.take-btn.yes.active{background:var(--g);color:#000;border-color:var(--g)}
+.take-btn.no{background:rgba(74,85,104,.1);color:var(--txt3);border-color:var(--bdr2)}
+.take-btn.no.active{background:rgba(74,85,104,.25);color:var(--txt2)}
+.outcome-row{display:flex;align-items:center;gap:7px;padding:9px 16px;background:rgba(0,0,0,.12);flex-wrap:wrap}
+.outcome-lbl{font-size:11px;color:var(--txt3);flex:1;min-width:100px}
+.out-btn{font-size:10px;font-weight:700;padding:4px 11px;border-radius:6px;border:1px solid;cursor:pointer;font-family:var(--sans);transition:all .15s}
+.out-win{background:var(--g-dim);color:var(--g);border-color:rgba(0,214,143,.3)}
+.out-win.active{background:var(--g);color:#000}
+.out-loss{background:var(--r-dim);color:var(--r);border-color:rgba(255,59,92,.3)}
+.out-loss.active{background:var(--r);color:#fff}
+.out-clear{background:rgba(74,85,104,.15);color:var(--txt3);border-color:var(--bdr2)}
+.card.taken{border-color:rgba(0,214,143,.35)}
+.card.not-taken{opacity:.72}
+.t-win{background:var(--g-dim);color:var(--g)}
+.t-loss{background:var(--r-dim);color:var(--r)}
+.t-open{background:var(--b-dim);color:var(--b)}
+
 /* Nav */
 .bnav{position:fixed;bottom:0;left:0;right:0;background:rgba(7,11,18,.97);
 backdrop-filter:blur(20px);border-top:1px solid var(--bdr);display:flex;
@@ -505,6 +549,14 @@ async function save(){
   toast('✓ Gemt');tab('Sig');doScan();
 }
 
+async function setTaken(key, taken){
+  await fetch('/api/take/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taken})});
+  setTimeout(load,400);
+}
+async function setOutcome(key, outcome){
+  await fetch('/api/outcome/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({outcome})});
+  setTimeout(load,400);
+}
 async function load(){
   try{const r=await fetch('/api/signals');data=await r.json();render();}catch(e){}
 }
@@ -598,7 +650,7 @@ function renderSigCard(s){
 <div class="sig-top">
   <div>
     <div class="coin-n">${s.symbol}</div>
-    <div class="tags"><span class="tag t-short">SHORT ▼</span>${nb}${wb}</div>
+    <div class="tags"><span class="tag t-short">SHORT ▼</span>${nb}${outcomeTag}</div>
   </div>
   <div class="pump-r">
     <div class="pump-n ${pc}">+${s.pump_size}%</div>
@@ -659,13 +711,14 @@ function render(){
   const ts=data.tracker_stats||{};
   const wr=ts.wr||0;
   const pnl=ts.net_pnl||0;
-  document.getElementById('sWR').innerHTML=
-    `<span style="color:${wr>=50?'var(--g)':'var(--r)'}">${wr||'—'}%</span>${ts.n?'<small>live</small>':''}`;
-  document.getElementById('sClosed').textContent=ts.n||'0';
+    document.getElementById('sWR').innerHTML=
+    ts.n?`<span style="color:${ts.wr>=50?'var(--g)':'var(--r)'}">${ts.wr}%</span>`:'—%';
+  document.getElementById('sClosed').innerHTML=
+    `${ts.n||0}<small style="color:var(--txt3);font-size:9px;margin-left:2px">tagne</small>`;
   document.getElementById('sPnl').innerHTML=
-    `<span style="color:${pnl>=0?'var(--g)':'var(--r)'}">${pnl>=0?'+':''}$${pnl||0}</span>`;
+    ts.net_pnl!=null?`<span style="color:${ts.net_pnl>=0?'var(--g)':'var(--r)'}">${ts.net_pnl>=0?'+':''}$${ts.net_pnl}</span>`:'—';
   document.getElementById('sActive').innerHTML=
-    `<span style="color:var(--b)">${ts.active||0}</span>`;
+    `<span style="color:var(--b)">${ts.taken_open||0}</span>/<span style="color:var(--txt3)">${ts.active||0}</span>`;
   document.getElementById('sLast').textContent=data.last_scan||'—';
 
   const b=document.getElementById('sbtn');
@@ -683,7 +736,7 @@ function render(){
   renderWrCard(ts);
 
   // Active signals (from tracker + new scanner signals)
-  const active=data.active_signals||[];
+  const active=data.active_signals_all||data.active_signals||[];
   const scanner=data.signals||[];
   // Merge: prefer tracker version (has live price), fallback to scanner
   const tracked=new Set(active.map(s=>s.symbol_full+'_'+s.ts?.slice(0,13)));
