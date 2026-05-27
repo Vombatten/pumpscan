@@ -568,6 +568,20 @@ function renderWrCard(ts){
 }
 
 function renderSigCard(s){
+  // Sæt defaults for felter der kan mangle fra tracker
+  s.age_h      = s.age_h      ?? 0;
+  s.is_new     = s.is_new     ?? false;
+  s.first_seen = s.first_seen || '—';
+  s.pump_size  = s.pump_size  || 0;
+  s.rsi        = s.rsi        || 0;
+  s.sl_pct     = s.sl_pct     || 8;
+  s.tp_pct     = s.tp_pct     || 0;
+  s.kelly_pct  = s.kelly_pct  || 0;
+  s.risk_usd   = s.risk_usd   || 0;
+  s.pos_usd    = s.pos_usd    || 0;
+  s.cur_price  = s.cur_price  || s.entry;
+  s.dist_tp_pct= s.dist_tp_pct ?? null;
+  s.dist_sl_pct= s.dist_sl_pct ?? null;
   const pc=s.pump_size>60?'big':'';
   const nb=s.is_new?'<span class="tag t-new">● NY</span>':'';
   const wb=s.dist_tp_pct!=null?'<span class="tag t-watch">● Live</span>':'';
@@ -575,7 +589,7 @@ function renderSigCard(s){
   const entry=s.entry,tp=s.tp,sl=s.sl;
   const range=sl-tp;
   const ePos=range>0?Math.max(3,Math.min(95,(sl-entry)/range*100)):60;
-  const cPos=range>0?Math.max(2,Math.min(97,(sl-cur)/range*100)):ePos;
+  const cPos=s.cur_pos??( range>0?Math.max(2,Math.min(97,(sl-cur)/range*100)):ePos );
   const distTP=s.dist_tp_pct!=null?s.dist_tp_pct.toFixed(1):'—';
   const distSL=s.dist_sl_pct!=null?s.dist_sl_pct.toFixed(1):'—';
   const dtpCol=parseFloat(distTP)<2?'color:var(--g);font-weight:700':'color:var(--txt3)';

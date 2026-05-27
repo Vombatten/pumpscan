@@ -146,7 +146,32 @@ class SignalTracker:
             rows = db.execute(
                 "SELECT * FROM signals WHERE outcome IS NULL "
                 "ORDER BY tracked_at DESC").fetchall()
-        return [dict(r) for r in rows]
+        now = datetime.now(timezone.utc)
+        result = []
+        for r in rows:
+            d = dict(r)
+            # Beregn age_h fra tracked_at
+            try:
+                ta    = datetime.fromisoformat(d["tracked_at"].replace("Z",""))
+                age_h = (now - ta.replace(tzinfo=timezone.utc)).total_seconds() / 3600
+            except Exception:
+                age_h = 0
+            d["age_h"]      = round(age_h, 2)
+            d["is_new"]     = age_h < 0.25
+            d["first_seen"] = d.get("first_seen") or (
+                datetime.fromisoformat(d["tracked_at"].replace("Z","")).strftime("%H:%M")
+                if d.get("tracked_at") else "—"
+            )
+            # bar_pos: hvor er entry mellem TP og SL (0-100%)
+            entry = d.get("entry", 0)
+            sl    = d.get("sl", 0)
+            tp    = d.get("tp", 0)
+            cur   = d.get("cur_price") or entry
+            rng   = sl - tp
+            d["bar_pos"]  = round(max(2, min(96, (sl-entry)/rng*100)), 1) if rng > 0 else 50
+            d["cur_pos"]  = round(max(2, min(97, (sl-cur)/rng*100)), 1)  if rng > 0 else 50
+            result.append(d)
+        return result
 
     def get_closed(self, n=50) -> list:
         with self._db() as db:
