@@ -1,0 +1,244 @@
+"""
+binance_feed.py — Real-time Binance kline feed via WebSocket
+
+Henter live OHLCV data direkte fra Binance WebSocket streams.
+Ingen API-nøgle, nul forsinkelse.
+
+Brug:
+    feed = BinanceFeed()
+    feed.subscribe(["PEPEUSDT","WIFUSDT","BONKUSDT"], interval="1h")
+    feed.start()
+    df = feed.get_ohlcv("PEPEUSDT", "1h")
+"""
+
+import json, time, threading, logging
+import websocket
+import pandas as pd
+import numpy as np
+from datetime import datetime, timezone
+from collections import defaultdict, deque
+
+logging.basicConfig(level=logging.WARNING)
+
+BINANCE_WS   = "wss://stream.binance.com:9443/stream"
+BINANCE_REST = "https://api.binance.com/api/v3"
+
+# Max candles i RAM per symbol
+MAX_CANDLES = 500
+
+
+class BinanceFeed:
+    """
+    Real-time Binance kline feed.
+    Kombinerer initial historik (REST) med live updates (WebSocket).
+    """
+
+    def __init__(self):
+        self._candles   = defaultdict(lambda: defaultdict(dict))
+        # {symbol: {interval: {open_time: {o,h,l,c,v,closed}}}}
+        self._lock      = threading.RLock()
+        self._ws        = None
+        self._ws_thread = None
+        self._running   = False
+        self._symbols   = []
+        self._interval  = "1h"
+        self._ready     = threading.Event()
+        self._error     = None
+
+    # ─────────────────────────────────────────────
+    #  REST: Historisk data (seed)
+    # ─────────────────────────────────────────────
+
+    def _fetch_history(self, symbol: str, interval: str, limit: int = 200):
+        """Henter historisk data fra Binance REST til initial seed."""
+        import urllib.request
+        url = (f"{BINANCE_REST}/klines?symbol={symbol.upper()}"
+               f"&interval={interval}&limit={limit}")
+        try:
+            with urllib.request.urlopen(url, timeout=10) as r:
+                data = json.loads(r.read())
+            with self._lock:
+                for k in data:
+                    ot = int(k[0])
+                    self._candles[symbol][interval][ot] = {
+                        "open_time": ot,
+                        "open":   float(k[1]),
+                        "high":   float(k[2]),
+                        "low":    float(k[3]),
+                        "close":  float(k[4]),
+                        "volume": float(k[5]),
+                        "closed": True,
+                    }
+        except Exception as e:
+            logging.warning(f"REST seed fejl {symbol}: {e}")
+
+    def _seed_all(self, symbols, interval):
+        """Henter historik for alle symboler parallelt."""
+        threads = []
+        for sym in symbols:
+            t = threading.Thread(
+                target=self._fetch_history,
+                args=(sym, interval),
+                daemon=True,
+            )
+            threads.append(t)
+            t.start()
+            time.sleep(0.05)   # Rate limit
+
+        for t in threads:
+            t.join(timeout=15)
+
+    # ─────────────────────────────────────────────
+    #  WebSocket
+    # ─────────────────────────────────────────────
+
+    def _build_stream_url(self, symbols, interval):
+        streams = "/".join(f"{s.lower()}@kline_{interval}" for s in symbols)
+        return f"{BINANCE_WS}?streams={streams}"
+
+    def _on_message(self, ws, message):
+        try:
+            msg = json.loads(message)
+            if "data" not in msg:
+                return
+            d   = msg["data"]
+            if d.get("e") != "kline":
+                return
+
+            k      = d["k"]
+            sym    = d["s"]
+            intv   = k["i"]
+            ot     = int(k["t"])
+
+            candle = {
+                "open_time": ot,
+                "open":      float(k["o"]),
+                "high":      float(k["h"]),
+                "low":       float(k["l"]),
+                "close":     float(k["c"]),
+                "volume":    float(k["v"]),
+                "closed":    bool(k["x"]),   # True = candle lukket
+            }
+
+            with self._lock:
+                self._candles[sym][intv][ot] = candle
+
+        except Exception as e:
+            logging.warning(f"WS message fejl: {e}")
+
+    def _on_open(self, ws):
+        self._ready.set()
+
+    def _on_error(self, ws, error):
+        self._error = str(error)
+        logging.warning(f"WS fejl: {error}")
+
+    def _on_close(self, ws, code, msg):
+        if self._running:
+            logging.warning("WS lukket — genforbinder om 5s")
+            time.sleep(5)
+            self._connect()
+
+    def _connect(self):
+        url = self._build_stream_url(self._symbols, self._interval)
+        self._ws = websocket.WebSocketApp(
+            url,
+            on_open    = self._on_open,
+            on_message = self._on_message,
+            on_error   = self._on_error,
+            on_close   = self._on_close,
+        )
+        self._ws_thread = threading.Thread(
+            target=self._ws.run_forever,
+            kwargs={"ping_interval": 20, "ping_timeout": 10},
+            daemon=True,
+        )
+        self._ws_thread.start()
+
+    # ─────────────────────────────────────────────
+    #  Public API
+    # ─────────────────────────────────────────────
+
+    def subscribe(self, symbols: list, interval: str = "1h"):
+        """Abonnér på symbols × interval."""
+        self._symbols  = [s.upper() for s in symbols]
+        self._interval = interval
+
+    def start(self, seed_history: bool = True, timeout: int = 15):
+        """
+        Start feed.
+        seed_history=True: Hent historisk data først via REST,
+                           derefter live via WebSocket.
+        """
+        self._running = True
+
+        if seed_history:
+            print(f"  [BinanceFeed] Henter historik for {len(self._symbols)} symboler...")
+            self._seed_all(self._symbols, self._interval)
+            print(f"  [BinanceFeed] Historik klar — starter WebSocket...")
+
+        self._connect()
+
+        if not self._ready.wait(timeout=timeout):
+            raise RuntimeError("Binance WebSocket timeout — tjek internet")
+
+        print(f"  [BinanceFeed] Live feed aktivt ✓  ({len(self._symbols)} symboler)")
+
+    def stop(self):
+        self._running = False
+        if self._ws:
+            self._ws.close()
+
+    def get_ohlcv(self, symbol: str, interval: str = None) -> pd.DataFrame:
+        """
+        Returnerer OHLCV DataFrame for symbol.
+        Kun lukkede candles (closed=True) medtages — sikker til signal-beregning.
+        """
+        intv = interval or self._interval
+        sym  = symbol.upper()
+
+        with self._lock:
+            data = dict(self._candles.get(sym, {}).get(intv, {}))
+
+        if not data:
+            return pd.DataFrame()
+
+        rows = sorted(data.values(), key=lambda x: x["open_time"])
+        # Kun lukkede candles (undgå signaler på halvfærdig candle)
+        rows = [r for r in rows if r["closed"]]
+        rows = rows[-MAX_CANDLES:]
+
+        df = pd.DataFrame(rows)
+        df["datetime"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        df = df.set_index("datetime")
+        df = df[["open","high","low","close","volume"]].rename(columns={
+            "open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"
+        })
+        return df.astype(float)
+
+    def last_price(self, symbol: str) -> float | None:
+        """Seneste close-pris (inkl. åben candle)."""
+        intv = self._interval
+        sym  = symbol.upper()
+        with self._lock:
+            data = self._candles.get(sym, {}).get(intv, {})
+        if not data:
+            return None
+        latest = max(data.values(), key=lambda x: x["open_time"])
+        return latest["close"]
+
+    def is_ready(self, symbol: str) -> bool:
+        """True hvis symbolet har data klar."""
+        with self._lock:
+            return bool(self._candles.get(symbol.upper(), {}).get(self._interval))
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "symbols":   len(self._symbols),
+                "connected": self._ws is not None and self._running,
+                "candles":   {
+                    s: len(self._candles.get(s,{}).get(self._interval,{}))
+                    for s in self._symbols[:5]
+                }
+            }
