@@ -144,7 +144,8 @@ def run_scan():
             if sig: sigs.append(sig)
         sigs.sort(key=lambda x:x["pump_size"],reverse=True)
         state["signals"]=sigs
-        state["last_scan"]=datetime.now().strftime("%H:%M:%S")
+        state["last_scan"]=datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        state["last_scan_ts"]=datetime.now(timezone.utc).isoformat()
         state["scan_count"]+=1
     except Exception as e:
         state["error"]=str(e)
@@ -176,7 +177,7 @@ def api_signals():
         "params":PARAMS,"kelly_pct":round(calc_kelly(STATS)*100,2),
         "capital":PARAMS["capital"],
         "tracker_stats":tr_stats,"active_signals_taken":[s for s in (tracker.get_active() if tracker else []) if s.get("taken")],"active_signals_all":tracker.get_active() if tracker else [],
-        "active_signals":active,
+        "active_signals":active,"active_signals_all":active,
     })
 
 @app.route("/api/debug")
@@ -893,7 +894,13 @@ function render(){
     ts.net_pnl!=null?`<span style="color:${ts.net_pnl>=0?'var(--g)':'var(--r)'}">${ts.net_pnl>=0?'+':''}$${ts.net_pnl}</span>`:'—';
   document.getElementById('sActive').innerHTML=
     `<span style="color:var(--b)">${ts.taken_open||0}</span>/<span style="color:var(--txt3)">${ts.active||0}</span>`;
-  document.getElementById('sLast').textContent=data.last_scan||'—';
+  if(data.last_scan_ts){
+    const d=new Date(data.last_scan_ts);
+    document.getElementById('sLast').textContent=
+      d.toLocaleTimeString('da-DK',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  } else {
+    document.getElementById('sLast').textContent=data.last_scan||'—';
+  }
 
   const b=document.getElementById('sbtn');
   data.scanning?b.classList.add('busy'):b.classList.remove('busy');
