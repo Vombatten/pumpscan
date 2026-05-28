@@ -40,8 +40,8 @@ feed        = None
 seen_sigs   = {}
 
 PARAMS = {
-    "pump_pct":15,"pump_window_h":24,"entry_delay_h":2,
-    "stop_loss_pct":3,"tp_atr":2,"rsi_max":80,
+    "pump_pct":20,"pump_window_h":24,"entry_delay_h":2,
+    "stop_loss_pct":8,"tp_atr":1.5,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
     "volume_filter":True,"min_pump_candles":2,
     "interval":"1h","capital":100,"top_n":40,
@@ -820,6 +820,26 @@ function renderSigCard(s){
   const pc=s.pump_size>60?'big':'';
   const nb=s.is_new?'<span class="tag t-new">● NY</span>':'';
   const wb=s.dist_tp_pct!=null?'<span class="tag t-watch">● Live</span>':'';
+  const taken = !!s.taken;
+  const outcome = s.effective_outcome||s.outcome||s.manual_outcome||null;
+  let outcomeTag='';
+  if(outcome==='WIN')  outcomeTag='<span class="tag t-win">✓ WIN</span>';
+  else if(outcome==='LOSS') outcomeTag='<span class="tag t-loss">✗ LOSS</span>';
+  else if(taken && !outcome) outcomeTag='<span class="tag t-open">● Åben</span>';
+  const takeRow=`<div class="take-row">
+    <div class="take-lbl">Har du taget denne trade?</div>
+    <div class="take-toggle">
+      <button class="take-btn yes${taken?' active':''}" onclick="setTaken('${encodeURIComponent(s.key||'')}',true)">✓ Ja</button>
+      <button class="take-btn no${!taken?' active':''}" onclick="setTaken('${encodeURIComponent(s.key||'')}',false)">✗ Nej</button>
+    </div></div>
+  ${taken?`<div class="outcome-row">
+    <div class="outcome-lbl">Udfald (manuel):</div>
+    <button class="out-btn out-win${outcome==='WIN'?' active':''}" onclick="setOutcome('${encodeURIComponent(s.key||'')}','WIN')">✓ WIN</button>
+    <button class="out-btn out-loss${outcome==='LOSS'?' active':''}" onclick="setOutcome('${encodeURIComponent(s.key||'')}','LOSS')">✗ LOSS</button>
+  </div>`:''}`;
+  const footLeft = outcome&&s.realized_pnl!=null
+    ? `<div><div class="krisk">Realiseret P&L</div><div class="kamt" style="color:${s.realized_pnl>=0?'var(--g)':'var(--r)'}">${s.realized_pnl>=0?'+$'+s.realized_pnl:'$'+s.realized_pnl}</div></div>`
+    : `<div><div class="krisk">Kelly position</div><div class="kamt" style="color:${taken?'var(--g)':'var(--txt3)'}">$${Number(s.pos_usd).toLocaleString()}</div><div class="krisk">risiker $${s.risk_usd}</div></div>`;
   const cur=s.cur_price||s.entry;
   const entry=s.entry,tp=s.tp,sl=s.sl;
   const range=sl-tp;
@@ -870,10 +890,9 @@ function renderSigCard(s){
     <span style="color:var(--txt3)">SL: ${distSL}% ◂</span>
   </div>
 </div>
+${takeRow}
 <div class="cfoot">
-  <div><div class="klbl">Kelly position</div>
-    <div class="kamt">$${Number(s.pos_usd).toLocaleString()}</div>
-    <div class="krisk">risiker $${s.risk_usd} · ${s.kelly_pct}%</div></div>
+  ${footLeft}
   <div class="tw">
     <div class="tseen">set ${s.first_seen}</div>
     <div class="tago">${fAge(s.age_h)}</div>
