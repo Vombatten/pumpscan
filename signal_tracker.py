@@ -153,7 +153,7 @@ class SignalTracker:
                 entry  = row["entry"] or 0
                 sl_pct = (row["sl_pct"] or 8) / 100
                 kelly  = (row["kelly_pct"] or 4) / 100
-                risk   = 10_000 * kelly   # Fallback kapital
+                risk   = 100 * kelly   # Fallback kapital ($100 test)
                 if outcome == "WIN":
                     tp   = row["tp"] or entry * 0.95
                     move = (entry - tp) / entry if entry > 0 else 0

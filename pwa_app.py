@@ -38,7 +38,7 @@ PARAMS = {
     "stop_loss_pct":8,"tp_atr":1.5,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
     "volume_filter":True,"min_pump_candles":2,
-    "interval":"1h","capital":10_000,"top_n":40,
+    "interval":"1h","capital":100,"top_n":40,
 }
 STATS = {"win_rate":0.701,"avg_win":121.0,"avg_loss":190.0}
 state = {
