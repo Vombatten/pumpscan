@@ -991,16 +991,56 @@ def startup():
     try:
         if not SCANNER_OK:
             state["feed_status"]="utils.py ikke fundet"; return
-        print("  Henter top coins fra Binance...")
-        top=fetch_top_altcoins()
-        symbols=[t["symbol"] for t in top[:int(PARAMS["top_n"])]]
-        state["n_symbols"]=len(symbols)
-        print(f"  {len(symbols)} symboler fundet")
+
+        symbols = []
+
+        # ── Bybit (ingen geo-blokering) ──
+        try:
+            import urllib.request as _ur, json as _js
+            print("  Henter top coins fra Bybit...")
+            with _ur.urlopen(
+                "https://api.bybit.com/v5/market/tickers?category=spot",
+                timeout=15) as _r:
+                tickers = _js.loads(_r.read()).get("result",{}).get("list",[])
+            exclude = {"BTC","ETH","BNB","USDC","DAI","TUSD","FDUSD","USDT","WBTC","WETH"}
+            tmp = []
+            for t in tickers:
+                sym = t.get("symbol","")
+                if not sym.endswith("USDT"): continue
+                if sym[:-4] in exclude: continue
+                vol = 0
+                for field in ["turnover24h","volume24h","vol24h"]:
+                    try:
+                        v = float(t.get(field,0) or 0)
+                        if v > 0: vol = v; break
+                    except: pass
+                if vol < 10_000: continue
+                tmp.append({"symbol": sym, "volume": vol})
+            tmp.sort(key=lambda x: x["volume"], reverse=True)
+            symbols = [t["symbol"] for t in tmp[:int(PARAMS["top_n"])]]
+            if not symbols:  # Absolut fallback
+                symbols = [t.get("symbol") for t in tickers
+                           if t.get("symbol","").endswith("USDT") and
+                           t.get("symbol","")[:-4] not in exclude][:int(PARAMS["top_n"])]
+            print(f"  Bybit: {len(symbols)} symboler")
+        except Exception as e:
+            print(f"  Bybit fejl: {e} — prøver Binance...")
+
+        # ── Binance fallback ──
+        if not symbols:
+            try:
+                top = fetch_top_altcoins()
+                symbols = [t["symbol"] for t in top[:int(PARAMS["top_n"])]]
+                print(f"  Binance: {len(symbols)} symboler")
+            except Exception as e:
+                state["feed_status"] = f"Fejl: {e}"; return
+
+        state["n_symbols"] = len(symbols)
         init_feed(symbols)
-        threading.Thread(target=continuous_scan,daemon=True).start()
+        threading.Thread(target=continuous_scan, daemon=True).start()
         print("  PumpScan kørende ✓")
     except Exception as e:
-        state["feed_status"]=f"Fejl: {e}"
+        state["feed_status"] = f"Fejl: {e}"
         print(f"  Startup fejl: {e}")
 
 threading.Thread(target=startup,daemon=True).start()
