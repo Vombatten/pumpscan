@@ -179,6 +179,52 @@ def api_signals():
         "active_signals":active,
     })
 
+@app.route("/api/debug")
+def api_debug():
+    """Viser hvad der fejler i scanneren."""
+    info = {
+        "SCANNER_OK":   SCANNER_OK,
+        "FEED_OK":      FEED_OK,
+        "feed_connected": state.get("feed_connected"),
+        "feed_status":  state.get("feed_status"),
+        "n_symbols":    state.get("n_symbols"),
+        "scan_count":   state.get("scan_count"),
+        "last_scan":    state.get("last_scan"),
+        "last_error":   state.get("error"),
+        "params":       PARAMS,
+    }
+    # Test grade_signal import
+    try:
+        from grade_signal import grade_signal, GRADE_RISK
+        info["grade_signal_ok"] = True
+    except Exception as e:
+        info["grade_signal_ok"] = False
+        info["grade_signal_error"] = str(e)
+
+    # Test strategy import
+    try:
+        from strategy_pump_dump import detect_pumps, interval_to_hours
+        info["strategy_ok"] = True
+    except Exception as e:
+        info["strategy_ok"] = False
+        info["strategy_error"] = str(e)
+
+    # Test feed
+    if feed:
+        try:
+            st = feed.status()
+            info["feed_detail"] = st
+            # Tjek om der er data for første symbol
+            syms = feed._symbols[:3] if feed._symbols else []
+            for s in syms:
+                df = feed.get_ohlcv(s)
+                info[f"data_{s}"] = len(df) if df is not None else 0
+        except Exception as e:
+            info["feed_error"] = str(e)
+
+    return jsonify(info)
+
+
 @app.route("/api/replay")
 def api_replay():
     hours = int(request.args.get("hours", 48))
