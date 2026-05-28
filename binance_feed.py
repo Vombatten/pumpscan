@@ -127,49 +127,55 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _build_stream_url(self, symbols, interval):
-        # Bybit WebSocket for spot klines
-        streams = "/".join(f"{s.lower()}@kline_{interval}" for s in symbols)
-        return f"{BINANCE_WS}?streams={streams}"
+        # Bybit WebSocket — ingen geo-blokering
+        return "wss://stream.bybit.com/v5/public/spot"
 
-    def _build_bybit_stream_url(self, symbols, interval):
+    def _on_open(self, ws):
+        """Subscribe til Bybit kline streams i batches."""
         iv_map = {"1m":"1","5m":"5","15m":"15","30m":"30",
-                  "1h":"60","4h":"240","1d":"D"}
-        bybit_iv = iv_map.get(interval, "60")
-        topics = [f"kline.{bybit_iv}.{s.upper()}" for s in symbols[:10]]
-        return BYBIT_WS
+                  "1h":"60","2h":"120","4h":"240","1d":"D"}
+        bybit_iv = iv_map.get(self._interval, "60")
+        for i in range(0, len(self._symbols), 10):
+            batch  = self._symbols[i:i+10]
+            topics = [f"kline.{bybit_iv}.{s.upper()}" for s in batch]
+            ws.send(json.dumps({"op": "subscribe", "args": topics}))
+            time.sleep(0.1)
+        self._ready.set()
 
     def _on_message(self, ws, message):
         try:
             msg = json.loads(message)
-            if "data" not in msg:
+            # Bybit ping
+            if msg.get("op") == "ping":
+                ws.send(json.dumps({"op": "pong"}))
                 return
-            d   = msg["data"]
-            if d.get("e") != "kline":
+            # Bybit kline: topic = "kline.60.BTCUSDT"
+            topic = msg.get("topic", "")
+            if not topic.startswith("kline."):
                 return
-
-            k      = d["k"]
-            sym    = d["s"]
-            intv   = k["i"]
-            ot     = int(k["t"])
-
+            data  = msg.get("data", [{}])
+            if not data:
+                return
+            k     = data[0]
+            parts = topic.split(".")
+            sym   = parts[2] if len(parts) > 2 else ""
+            iv_map = {"1":"1m","5":"5m","15":"15m","30":"30m",
+                      "60":"1h","120":"2h","240":"4h","D":"1d"}
+            intv  = iv_map.get(parts[1], self._interval)
+            ot    = int(k.get("start", 0))
             candle = {
                 "open_time": ot,
-                "open":      float(k["o"]),
-                "high":      float(k["h"]),
-                "low":       float(k["l"]),
-                "close":     float(k["c"]),
-                "volume":    float(k["v"]),
-                "closed":    bool(k["x"]),   # True = candle lukket
+                "open":   float(k.get("open",   0)),
+                "high":   float(k.get("high",   0)),
+                "low":    float(k.get("low",    0)),
+                "close":  float(k.get("close",  0)),
+                "volume": float(k.get("volume", 0)),
+                "closed": bool(k.get("confirm", False)),
             }
-
             with self._lock:
                 self._candles[sym][intv][ot] = candle
-
         except Exception as e:
             logging.warning(f"WS message fejl: {e}")
-
-    def _on_open(self, ws):
-        self._ready.set()
 
     def _on_error(self, ws, error):
         self._error = str(error)
