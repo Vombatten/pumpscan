@@ -499,9 +499,9 @@ border-radius:50%;animation:rot .7s linear infinite}
 .take-toggle{display:flex;gap:6px}
 .take-btn{font-size:11px;font-weight:700;padding:5px 13px;border-radius:8px;border:1px solid;cursor:pointer;font-family:var(--sans);transition:all .15s}
 .take-btn.yes{background:var(--g-dim);color:var(--g);border-color:rgba(0,214,143,.3)}
-.take-btn.yes.active{background:var(--g);color:#000;border-color:var(--g);box-shadow:0 0 8px rgba(0,214,143,.3)}
+.take-btn.yes.active{background:var(--g);color:#000;border-color:var(--g)}
 .take-btn.no{background:rgba(74,85,104,.1);color:var(--txt3);border-color:var(--bdr2)}
-.take-btn.no.active{background:#2a3444;color:var(--txt);border-color:var(--txt3);font-weight:800}
+.take-btn.no.active{background:rgba(74,85,104,.25);color:var(--txt2)}
 .outcome-row{display:flex;align-items:center;gap:7px;padding:9px 16px;background:rgba(0,0,0,.12);flex-wrap:wrap}
 .outcome-lbl{font-size:11px;color:var(--txt3);flex:1;min-width:100px}
 .out-btn{font-size:10px;font-weight:700;padding:4px 11px;border-radius:6px;border:1px solid;cursor:pointer;font-family:var(--sans);transition:all .15s}
@@ -737,14 +737,8 @@ async function save(){
 }
 
 async function setTaken(key, taken){
-  try{
-    const r = await fetch('/api/take/'+key,{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({taken})});
-    const d = await r.json();
-    toast(taken ? '✓ Trade markeret som taget' : '✗ Trade markeret som ikke taget');
-  } catch(e){ toast('Fejl: '+e.message); }
-  setTimeout(load, 400);
+  await fetch('/api/take/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taken})});
+  setTimeout(load,400);
 }
 async function setOutcome(key, outcome){
   await fetch('/api/outcome/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({outcome})});
@@ -904,7 +898,7 @@ ${takeRow}
 <div class="cfoot">
   ${footLeft}
   <div class="tw">
-    <div class="tseen">set ${s.tracked_at?new Date(s.tracked_at).toLocaleTimeString('da-DK',{hour:'2-digit',minute:'2-digit'}):s.first_seen}</div>
+    <div class="tseen">set ${s.first_seen}</div>
     <div class="tago">${fAge(s.age_h)}</div>
   </div>
 </div></div>`;
