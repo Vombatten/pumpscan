@@ -40,8 +40,8 @@ feed        = None
 seen_sigs   = {}
 
 PARAMS = {
-    "pump_pct":15,"pump_window_h":24,"entry_delay_h":2,
-    "stop_loss_pct":3,"tp_atr":2,"rsi_max":80,
+    "pump_pct":20,"pump_window_h":24,"entry_delay_h":2,
+    "stop_loss_pct":8,"tp_atr":1.5,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
     "volume_filter":True,"min_pump_candles":2,
     "interval":"1h","capital":100,"top_n":40,
@@ -237,13 +237,17 @@ def api_debug():
 @app.route("/api/replay")
 def api_replay():
     hours = int(request.args.get("hours", 48))
-    if not REPLAY_OK or not SCANNER_OK:
+    if not SCANNER_OK:
         return jsonify({"signals": [], "error": "Scanner ikke klar"})
+    if not feed or not state["feed_connected"]:
+        return jsonify({"signals": [], "error": "Feed ikke forbundet"})
     syms = feed._symbols if feed else []
     if not syms:
-        return jsonify({"signals": [], "error": "Feed ikke forbundet"})
+        return jsonify({"signals": [], "error": "Ingen symboler i feed"})
+    # Brug feed's allerede-hentede data
     try:
-        sigs = run_replay(syms, PARAMS, hours=hours)
+        from replay_scan import replay_from_feed
+        sigs = replay_from_feed(feed, syms, PARAMS, hours=hours)
         wins   = sum(1 for s in sigs if s["outcome"]=="TP")
         losses = sum(1 for s in sigs if s["outcome"]=="SL")
         pnl    = sum(s["pnl"] for s in sigs if s["outcome"] in ("TP","SL"))

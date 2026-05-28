@@ -198,3 +198,131 @@ def replay(symbols: list, params: dict, hours: int = 48) -> list:
     # Sortér nyeste først
     all_signals.sort(key=lambda s: s["ts"], reverse=True)
     return all_signals
+
+
+def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list:
+    """
+    Replay der bruger feedets allerede-hentede OHLCV data.
+    Ingen Binance/Bybit kald nødvendigt.
+    """
+    from datetime import datetime, timezone, timedelta
+    import pandas as pd
+    import numpy as np
+
+    interval   = params.get("interval", "1h")
+    ih         = interval_to_hours(interval)
+    delay_c    = max(1, int(params.get("entry_delay_h", 2) / ih))
+    hold_c     = max(1, int(params.get("max_hold_h", 48) / ih))
+    sl_pct     = params.get("stop_loss_pct", 5.5) / 100
+    tp_atr     = params.get("tp_atr", 1.5)
+    pump_min   = params.get("pump_pct", 20)
+    rsi_max    = params.get("rsi_max", 80)
+    pump_win_h = params.get("pump_window_h", 24)
+    costs      = (params.get("fee_pct", 0.06) +
+                  params.get("slippage_pct", 0.15)) / 100
+    capital    = params.get("capital", 100)
+    cutoff     = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    all_signals = []
+
+    for symbol in symbols:
+        try:
+            # Hent fra feed cache
+            df_raw = feed.get_ohlcv(symbol, interval)
+            if df_raw is None or len(df_raw) < 30:
+                continue
+
+            df = df_raw.copy()
+            df.columns = [c.lower() for c in df.columns]
+            df["rsi_v"] = rsi(df["close"], 14)
+            df["atr_v"] = atr(df, 14)
+
+            can = max(1, int(pump_win_h / ih))
+            roll_h = df["high"].rolling(can).max().shift(1)
+            roll_l = df["low"].rolling(can).min().shift(1)
+            pump_pct_series = ((roll_h - roll_l) / roll_l * 100).fillna(0)
+            avg_vol = df["volume"].rolling(can*2).mean().shift(1)
+            vol_ok  = df["volume"] > avg_vol * 1.5
+
+            for i in range(max(delay_c, can+1), len(df)):
+                ts = df.index[i]
+                ts_utc = ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
+                if ts_utc < cutoff:
+                    continue
+
+                pi = i - delay_c
+                row  = df.iloc[i]
+                prev = df.iloc[pi]
+
+                if pd.isna(row["rsi_v"]) or pd.isna(row["atr_v"]): continue
+                if row["atr_v"] <= 0: continue
+                if not (pump_pct_series.iloc[pi] >= pump_min and
+                        vol_ok.iloc[pi] and
+                        row["rsi_v"] < rsi_max and
+                        row["close"] < prev["high"]): continue
+
+                ep       = row["close"] * (1 + costs / 2)
+                roll_hi_v= roll_h.iloc[pi]
+                pmp_pct_v= pump_pct_series.iloc[pi]
+
+                grade_info = grade_signal(
+                    pump_pct    = pmp_pct_v,
+                    rsi         = row["rsi_v"],
+                    entry_price = ep,
+                    pump_high   = roll_hi_v,
+                    atr         = row["atr_v"],
+                    avg_volume  = avg_vol.iloc[pi] if not pd.isna(avg_vol.iloc[pi]) else 1,
+                    pump_volume = df["volume"].iloc[pi],
+                )
+                if grade_info["grade"] != "A":
+                    continue
+
+                sl_price = ep * (1 + sl_pct)
+                tp_price = ep - row["atr_v"] * tp_atr
+                risk_amt = capital * 0.07
+                size     = risk_amt / (ep * sl_pct)
+
+                # Simulér exit
+                outcome = "OPEN"; exit_price = None; exit_time = None; hold_c2 = 0
+                for j in range(i+1, min(i+1+hold_c, len(df))):
+                    fut = df.iloc[j]; hold_c2 += 1
+                    if fut["low"] <= tp_price:
+                        outcome, exit_price, exit_time = "TP", tp_price, df.index[j]; break
+                    elif fut["high"] >= sl_price:
+                        outcome, exit_price, exit_time = "SL", sl_price, df.index[j]; break
+                if outcome == "OPEN" and hold_c2 >= hold_c:
+                    outcome = "TIMEOUT"
+                    exit_price = df.iloc[min(i+hold_c,len(df)-1)]["close"]
+                    exit_time  = df.index[min(i+hold_c,len(df)-1)]
+
+                pnl = (ep - exit_price) * size - ep * size * costs if exit_price else 0
+                dur_h = hold_c2 * ih
+                dur_str = f"{int(dur_h)}H {int((dur_h%1)*60)}M"
+
+                all_signals.append({
+                    "symbol":      symbol.replace("USDT",""),
+                    "symbol_full": symbol,
+                    "ts":          ts_utc.isoformat(),
+                    "ts_str":      ts_utc.strftime("%d/%m %H:%M"),
+                    "entry":       round(ep, 6),
+                    "sl":          round(sl_price, 6),
+                    "tp":          round(tp_price, 6),
+                    "sl_pct":      round(sl_pct*100, 1),
+                    "tp_pct":      round((ep-tp_price)/ep*100, 1),
+                    "pump_size":   round(pmp_pct_v, 1),
+                    "rsi":         round(row["rsi_v"], 1),
+                    "grade":       grade_info["grade"],
+                    "outcome":     outcome,
+                    "exit_price":  round(exit_price, 6) if exit_price else None,
+                    "exit_time":   exit_time.strftime("%d/%m %H:%M") if exit_time else None,
+                    "pnl":         round(pnl, 2),
+                    "duration":    dur_str,
+                    "risk_usd":    round(risk_amt, 2),
+                    "pos_usd":     round(risk_amt / sl_pct, 0),
+                    "missed":      True,
+                })
+        except Exception:
+            continue
+
+    all_signals.sort(key=lambda s: s["ts"], reverse=True)
+    return all_signals
