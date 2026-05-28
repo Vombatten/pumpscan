@@ -98,6 +98,19 @@ class SignalTracker:
 
         # Effektivt outcome: auto > manuelt
         d["effective_outcome"] = d.get("outcome") or d.get("manual_outcome")
+
+        # Er signalet lukket inden for de seneste 30 min?
+        if d.get("closed_at"):
+            try:
+                closed = datetime.fromisoformat(d["closed_at"].replace("Z",""))
+                min_since_close = (now - closed.replace(tzinfo=timezone.utc)).total_seconds() / 60
+                d["recently_closed"] = min_since_close < 30
+                d["min_since_close"] = round(min_since_close, 0)
+            except Exception:
+                d["recently_closed"] = False
+        else:
+            d["recently_closed"] = False
+
         return d
 
     # ─────────────────────────────────────────────
@@ -300,12 +313,14 @@ class SignalTracker:
                         round((sl-cur)/entry*100,2) if entry else 0,
                         round((entry-cur)/entry*100,2) if entry else 0,
                     )
-                    # Auto-close kun hvis IKKE manuelt sat
-                    if not sig.get("manual_outcome"):
+                    # Auto-close KUN hvis:
+                    # 1. Trade er markeret som "taget"
+                    # 2. Ikke allerede manuelt sat
+                    if sig.get("taken") and not sig.get("manual_outcome"):
                         if cur <= tp:
-                            self._close_auto(key,"WIN", tp,  capital)
+                            self._close_auto(key,"WIN", tp, capital)
                         elif cur >= sl:
-                            self._close_auto(key,"LOSS",sl,  capital)
+                            self._close_auto(key,"LOSS",sl, capital)
             time.sleep(2)
 
     def start(self, capital=10_000):
