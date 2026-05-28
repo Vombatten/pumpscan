@@ -994,46 +994,70 @@ def startup():
 
         symbols = []
 
-        # ── Bybit (ingen geo-blokering) ──
+        # ── CoinGecko (ingen geo-blokering) ──
         try:
             import urllib.request as _ur, json as _js
-            print("  Henter top coins fra Bybit...")
-            with _ur.urlopen(
-                "https://api.bybit.com/v5/market/tickers?category=spot",
-                timeout=15) as _r:
-                tickers = _js.loads(_r.read()).get("result",{}).get("list",[])
-            exclude = {"BTC","ETH","BNB","USDC","DAI","TUSD","FDUSD","USDT","WBTC","WETH"}
+            print("  Henter top coins fra CoinGecko...")
+            url = ("https://api.coingecko.com/api/v3/coins/markets"
+                   "?vs_currency=usd&order=volume_desc&per_page=100"
+                   "&page=1&sparkline=false")
+            req = _ur.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with _ur.urlopen(req, timeout=15) as _r:
+                coins = _js.loads(_r.read())
+            exclude = {"bitcoin","ethereum","tether","binancecoin",
+                       "usd-coin","dai","staked-ether","wrapped-bitcoin"}
             tmp = []
-            for t in tickers:
-                sym = t.get("symbol","")
-                if not sym.endswith("USDT"): continue
-                if sym[:-4] in exclude: continue
-                vol = 0
-                for field in ["turnover24h","volume24h","vol24h"]:
-                    try:
-                        v = float(t.get(field,0) or 0)
-                        if v > 0: vol = v; break
-                    except: pass
-                if vol < 10_000: continue
+            for c in coins:
+                cid  = c.get("id","")
+                sym  = c.get("symbol","").upper() + "USDT"
+                vol  = float(c.get("total_volume", 0) or 0)
+                if cid in exclude: continue
+                if vol < 1_000_000: continue
                 tmp.append({"symbol": sym, "volume": vol})
             tmp.sort(key=lambda x: x["volume"], reverse=True)
             symbols = [t["symbol"] for t in tmp[:int(PARAMS["top_n"])]]
-            if not symbols:  # Absolut fallback
-                symbols = [t.get("symbol") for t in tickers
-                           if t.get("symbol","").endswith("USDT") and
-                           t.get("symbol","")[:-4] not in exclude][:int(PARAMS["top_n"])]
-            print(f"  Bybit: {len(symbols)} symboler")
+            print(f"  CoinGecko: {len(symbols)} symboler")
         except Exception as e:
-            print(f"  Bybit fejl: {e} — prøver Binance...")
+            print(f"  CoinGecko fejl: {e}")
 
-        # ── Binance fallback ──
+        # ── Bybit fallback ──
         if not symbols:
             try:
-                top = fetch_top_altcoins()
-                symbols = [t["symbol"] for t in top[:int(PARAMS["top_n"])]]
-                print(f"  Binance: {len(symbols)} symboler")
+                import urllib.request as _ur, json as _js
+                print("  Prøver Bybit...")
+                with _ur.urlopen(
+                    "https://api.bybit.com/v5/market/tickers?category=spot",
+                    timeout=15) as _r:
+                    tickers = _js.loads(_r.read()).get("result",{}).get("list",[])
+                exclude = {"BTC","ETH","BNB","USDC","DAI","TUSD","USDT","WBTC","WETH"}
+                tmp = []
+                for t in tickers:
+                    sym = t.get("symbol","")
+                    if not sym.endswith("USDT"): continue
+                    if sym[:-4] in exclude: continue
+                    try: vol = float(t.get("turnover24h",0) or 0)
+                    except: vol = 0
+                    if vol < 10_000: continue
+                    tmp.append({"symbol": sym, "volume": vol})
+                tmp.sort(key=lambda x: x["volume"], reverse=True)
+                symbols = [t["symbol"] for t in tmp[:int(PARAMS["top_n"])]]
+                print(f"  Bybit: {len(symbols)} symboler")
             except Exception as e:
-                state["feed_status"] = f"Fejl: {e}"; return
+                print(f"  Bybit fejl: {e}")
+
+        # ── Hardkodet fallback ──
+        if not symbols:
+            print("  Bruger hardkodet symbol liste...")
+            symbols = [
+                "SOLUSDT","XRPUSDT","DOGEUSDT","ADAUSDT","AVAXUSDT",
+                "SHIBUSDT","DOTUSDT","LTCUSDT","LINKUSDT","MATICUSDT",
+                "UNIUSDT","ATOMUSDT","XLMUSDT","ETCUSDT","BCHUSDT",
+                "FILUSDT","APTUSDT","ARBUSDT","OPUSDT","INJUSDT",
+                "SUIUSDT","SEIUSDT","TIAUSDT","WLDUSDT","FETUSDT",
+                "RENDERUSDT","RUNEUSDT","ICPUSDT","AAVEUSDT","SNXUSDT",
+                "CRVUSDT","MKRUSDT","COMPUSDT","YFIUSDT","SUSHIUSDT",
+                "1INCHUSDT","GALAUSDT","SANDUSDT","MANAUSDT","ENJUSDT",
+            ]
 
         state["n_symbols"] = len(symbols)
         init_feed(symbols)
