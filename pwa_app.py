@@ -40,8 +40,8 @@ feed        = None
 seen_sigs   = {}
 
 PARAMS = {
-    "pump_pct":15,"pump_window_h":24,"entry_delay_h":2,
-    "stop_loss_pct":3,"tp_atr":2,"rsi_max":80,
+    "pump_pct":20,"pump_window_h":24,"entry_delay_h":2,
+    "stop_loss_pct":8,"tp_atr":1.5,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
     "volume_filter":True,"min_pump_candles":2,
     "interval":"1h","capital":100,"top_n":40,
