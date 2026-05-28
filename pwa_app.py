@@ -24,6 +24,12 @@ except ImportError:
     FEED_OK = False
 
 try:
+    from replay_scan import replay as run_replay
+    REPLAY_OK = True
+except ImportError:
+    REPLAY_OK = False
+
+try:
     from signal_tracker import SignalTracker
     tracker = SignalTracker()
 except ImportError:
@@ -172,6 +178,33 @@ def api_signals():
         "tracker_stats":tr_stats,"active_signals_taken":[s for s in (tracker.get_active() if tracker else []) if s.get("taken")],"active_signals_all":tracker.get_active() if tracker else [],
         "active_signals":active,
     })
+
+@app.route("/api/replay")
+def api_replay():
+    hours = int(request.args.get("hours", 48))
+    if not REPLAY_OK or not SCANNER_OK:
+        return jsonify({"signals": [], "error": "Scanner ikke klar"})
+    syms = feed._symbols if feed else []
+    if not syms:
+        return jsonify({"signals": [], "error": "Feed ikke forbundet"})
+    try:
+        sigs = run_replay(syms, PARAMS, hours=hours)
+        wins   = sum(1 for s in sigs if s["outcome"]=="TP")
+        losses = sum(1 for s in sigs if s["outcome"]=="SL")
+        pnl    = sum(s["pnl"] for s in sigs if s["outcome"] in ("TP","SL"))
+        return jsonify({
+            "signals": sigs,
+            "hours":   hours,
+            "n":       len(sigs),
+            "wins":    wins,
+            "losses":  losses,
+            "open":    sum(1 for s in sigs if s["outcome"]=="OPEN"),
+            "pnl":     round(pnl, 2),
+            "wr":      round(wins/(wins+losses)*100, 1) if (wins+losses)>0 else 0,
+        })
+    except Exception as e:
+        return jsonify({"signals": [], "error": str(e)})
+
 
 @app.route("/api/history")
 def api_history():
@@ -464,6 +497,7 @@ pointer-events:none;white-space:nowrap;z-index:200}
 <div class="tabs">
   <button class="tab on" id="tSig" onclick="tab('Sig')">📡 Signaler</button>
   <button class="tab" id="tHis" onclick="tab('His')">📊 Historik</button>
+  <button class="tab" id="tRep" onclick="tab('Rep');loadReplay()">🔄 Replay</button>
   <button class="tab" id="tSet" onclick="tab('Set')">⚙️ Indstillinger</button>
 </div>
 
@@ -474,6 +508,25 @@ pointer-events:none;white-space:nowrap;z-index:200}
     <div class="sec" id="sigSec" style="display:none">Under observation</div>
     <div id="sigList"></div>
   </div>
+  <div class="spacer"></div>
+</div>
+
+<!-- Replay -->
+<div id="pRep" class="panel">
+  <div style="display:flex;align-items:center;gap:10px;padding:14px 14px 0">
+    <select id="replayHours" style="background:var(--bg2);border:1px solid var(--bdr2);
+      color:var(--txt);border-radius:8px;padding:6px 10px;font-size:13px">
+      <option value="24">Seneste 24 timer</option>
+      <option value="48" selected>Seneste 48 timer</option>
+      <option value="72">Seneste 72 timer</option>
+    </select>
+    <button onclick="loadReplay()" style="background:var(--g);color:#000;border:none;
+      font-weight:700;font-size:12px;padding:8px 14px;border-radius:8px;cursor:pointer">
+      ↻ Scan
+    </button>
+    <span id="replayStatus" style="font-size:12px;color:var(--txt3)"></span>
+  </div>
+  <div id="replayList" style="padding:14px"></div>
   <div class="spacer"></div>
 </div>
 
@@ -508,6 +561,7 @@ pointer-events:none;white-space:nowrap;z-index:200}
 <div class="bnav">
   <button class="ni on" id="nSig" onclick="tab('Sig')"><span class="ni-ico">📡</span>Signaler</button>
   <button class="ni" id="nHis" onclick="tab('His')"><span class="ni-ico">📊</span>Historik</button>
+  <button class="ni" id="nRep" onclick="tab('Rep');loadReplay()"><span class="ni-ico">🔄</span>Replay</button>
   <button class="ni" id="nSet" onclick="tab('Set')"><span class="ni-ico">⚙️</span>Indstillinger</button>
 </div>
 <div class="toast" id="toast"></div>
@@ -515,8 +569,82 @@ pointer-events:none;white-space:nowrap;z-index:200}
 <script>
 let data=null,hist=null;
 
+async function loadReplay(){
+  const hours = document.getElementById('replayHours').value;
+  const status = document.getElementById('replayStatus');
+  const list   = document.getElementById('replayList');
+  status.textContent = 'Scanner...';
+  list.innerHTML = '<div class="loader"><div class="spin"></div><div class="stxt">Scanner '+(hours)+'t historik...</div></div>';
+  try{
+    const r  = await fetch('/api/replay?hours='+hours);
+    const d  = await r.json();
+    if(d.error){ status.textContent=d.error; list.innerHTML=''; return; }
+    const sigs = d.signals||[];
+    status.textContent = `${d.n} signaler · ${d.wr}% WR · P&L $${d.pnl>=0?'+':''}${d.pnl}`;
+    if(!sigs.length){
+      list.innerHTML='<div class="empty"><div class="eico">📭</div><div class="etit">Ingen signaler</div>'+
+        '<div class="esub">Ingen A-grade signaler fundet<br>i de seneste '+hours+' timer</div></div>';
+      return;
+    }
+    // Stats banner
+    const winCol = d.wr>=60?'var(--g)':d.wr>=50?'var(--y)':'var(--r)';
+    let html = `<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px">
+      ${[['Signaler',d.n,''],['Win rate',d.wr+'%',winCol],
+         ['P&L',`$${d.pnl>=0?'+':''}${d.pnl}`,d.pnl>=0?'var(--g)':'var(--r)'],
+         ['Åbne',d.open,'var(--b)']].map(([l,v,c])=>`
+      <div style="background:var(--bg2);border:1px solid var(--bdr2);border-radius:12px;padding:10px 12px">
+        <div style="font-size:10px;color:var(--txt3);margin-bottom:3px;text-transform:uppercase;letter-spacing:.07em">${l}</div>
+        <div style="font-family:var(--mono);font-size:16px;font-weight:700;color:${c||'var(--txt)'}">${v}</div>
+      </div>`).join('')}
+    </div>`;
+    html += sigs.map(s=>{
+      const win  = s.outcome==='TP';
+      const open = s.outcome==='OPEN';
+      const col  = win?'var(--g)':open?'var(--y)':'var(--r)';
+      const ico  = win?'✓':open?'⏳':'✗';
+      const pnlStr = s.pnl>=0?'+$'+s.pnl:'$'+s.pnl;
+      return`<div style="background:var(--bg2);border:1px solid ${win?'rgba(0,214,143,.3)':open?'rgba(59,130,246,.2)':'var(--bdr2)'};
+        border-radius:14px;margin-bottom:10px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--bdr)">
+          <div style="width:32px;height:32px;border-radius:8px;background:${win?'var(--g-dim)':open?'var(--b-dim)':'var(--r-dim)'};
+            display:grid;place-items:center;font-size:16px;flex-shrink:0">${ico}</div>
+          <div>
+            <div style="font-size:17px;font-weight:900;letter-spacing:-.5px">${s.symbol}</div>
+            <div style="font-size:10px;color:var(--txt3);margin-top:2px">${s.ts_str} · pump +${s.pump_size}% · RSI ${s.rsi}</div>
+          </div>
+          <div style="margin-left:auto;text-align:right">
+            <div style="font-family:var(--mono);font-size:15px;font-weight:700;color:${col}">${open?'Åben':pnlStr}</div>
+            <div style="font-size:10px;color:var(--txt3)">${s.outcome}${s.exit_time?' · '+s.exit_time:''}</div>
+          </div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;font-size:11px">
+          <div style="padding:8px 12px;border-right:1px solid var(--bdr)">
+            <div style="color:var(--txt3);margin-bottom:2px">Entry</div>
+            <div style="font-family:var(--mono);font-weight:700">$${s.entry}</div>
+          </div>
+          <div style="padding:8px 12px;border-right:1px solid var(--bdr)">
+            <div style="color:var(--r);margin-bottom:2px">SL +${s.sl_pct}%</div>
+            <div style="font-family:var(--mono);font-weight:700;color:var(--r)">$${s.sl}</div>
+          </div>
+          <div style="padding:8px 12px">
+            <div style="color:var(--g);margin-bottom:2px">TP ${s.tp_pct}%</div>
+            <div style="font-family:var(--mono);font-weight:700;color:var(--g)">$${s.tp}</div>
+          </div>
+        </div>
+        <div style="padding:8px 14px;background:rgba(0,0,0,.15);font-size:11px;
+          display:flex;justify-content:space-between;color:var(--txt3)">
+          <span>Varighed: ${s.duration}</span>
+          <span>Kelly pos: $${Number(s.pos_usd).toLocaleString()}</span>
+          <span style="color:var(--txt3)">Ikke taget</span>
+        </div>
+      </div>`;
+    }).join('');
+    list.innerHTML=html;
+  }catch(e){ status.textContent='Fejl: '+e; list.innerHTML=''; }
+}
+
 function tab(t){
-  ['Sig','His','Set'].forEach(x=>{
+  ['Sig','His','Rep','Set'].forEach(x=>{
     document.getElementById('p'+x).classList.toggle('on',x===t);
     document.getElementById('t'+x).classList.toggle('on',x===t);
     document.getElementById('n'+x).classList.toggle('on',x===t);
