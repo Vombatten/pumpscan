@@ -223,6 +223,14 @@ def api_debug():
         except Exception as e:
             info["feed_error"] = str(e)
 
+    # Vis aktive signaler råt
+    if tracker:
+        try:
+            active = tracker.get_active()
+            info["active_count"] = len(active)
+            info["active_sample"] = active[:2] if active else []
+        except Exception as e:
+            info["active_error"] = str(e)
     return jsonify(info)
 
 
