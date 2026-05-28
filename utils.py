@@ -16,6 +16,7 @@ from datetime import datetime, timedelta
 # ─────────────────────────────────────────────
 
 BINANCE_BASE = "https://api.binance.com/api/v3"
+BYBIT_BASE   = "https://api.bybit.com/v5/market"
 
 def fetch_ohlcv(symbol: str, interval: str, days: int = 90) -> pd.DataFrame:
     """
@@ -71,47 +72,69 @@ def fetch_ohlcv(symbol: str, interval: str, days: int = 90) -> pd.DataFrame:
     return df
 
 
-def fetch_top_altcoins(quote="USDT", min_volume_usd=500_000) -> list[str]:
+def fetch_top_altcoins(quote="USDT", min_volume_usd=500_000) -> list:
     """
-    Returnerer liste af altcoin-symboler sorteret efter 24h volumen.
-    Bruges til pump-scanner.
+    Returnerer top altcoins sorteret efter 24h volumen.
+    Prøver Bybit først (ingen geo-blokering), fallback til Binance.
     """
-    url  = f"{BINANCE_BASE}/ticker/24hr"
-    resp = requests.get(url, timeout=10)
-    resp.raise_for_status()
-    tickers = resp.json()
+    # ── Bybit (ingen geo-blokering) ──
+    try:
+        url  = f"{BYBIT_BASE}/tickers?category=spot"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        tickers = data.get("result", {}).get("list", [])
+        result = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if not sym.endswith(quote):
+                continue
+            base = sym[:-len(quote)]
+            if base in ("BTC","ETH","BNB","USDC","DAI","TUSD","FDUSD"):
+                continue
+            try:
+                vol = float(t.get("turnover24h", 0) or 0)
+                price = float(t.get("lastPrice", 0) or 0)
+            except (ValueError, TypeError):
+                continue
+            if vol < min_volume_usd or price <= 0:
+                continue
+            result.append({"symbol": sym, "volume": vol,
+                           "price": price, "source": "bybit"})
+        if result:
+            result.sort(key=lambda x: x["volume"], reverse=True)
+            return result
+    except Exception:
+        pass
 
-    symbols = []
-    for t in tickers:
-        sym = t["symbol"]
-        if not sym.endswith(quote):
-            continue
-        base = sym[:-len(quote)]
-        # Filtrer BTC, ETH, stablecoins og leveraged tokens
-        if base in ("BTC","ETH","BNB","USDC","BUSD","TUSD","DAI"):
-            continue
-        if any(x in base for x in ["UP","DOWN","BULL","BEAR","3L","3S"]):
-            continue
-        try:
-            vol = float(t["quoteVolume"])
-            chg = float(t["priceChangePercent"])
-        except (ValueError, KeyError):
-            continue
-        if vol >= min_volume_usd:
-            symbols.append({
-                "symbol": sym,
-                "base":   base,
-                "volume": vol,
-                "change_24h": chg,
-            })
+    # ── Binance fallback ──
+    try:
+        url  = f"{BINANCE_BASE}/ticker/24hr"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        tickers = resp.json()
+        result = []
+        for t in tickers:
+            sym = t.get("symbol", "")
+            if not sym.endswith(quote):
+                continue
+            base = sym[:-len(quote)]
+            if base in ("BTC","ETH","BNB","USDC","DAI","TUSD","FDUSD"):
+                continue
+            try:
+                vol   = float(t.get("quoteVolume", 0) or 0)
+                price = float(t.get("lastPrice", 0) or 0)
+            except (ValueError, TypeError):
+                continue
+            if vol < min_volume_usd or price <= 0:
+                continue
+            result.append({"symbol": sym, "volume": vol,
+                           "price": price, "source": "binance"})
+        result.sort(key=lambda x: x["volume"], reverse=True)
+        return result
+    except Exception:
+        return []
 
-    symbols.sort(key=lambda x: x["volume"], reverse=True)
-    return symbols[:60]  # Top-60 altcoins
-
-
-# ─────────────────────────────────────────────
-#  Tekniske indikatorer
-# ─────────────────────────────────────────────
 
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()

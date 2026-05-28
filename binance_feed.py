@@ -21,7 +21,9 @@ from collections import defaultdict, deque
 logging.basicConfig(level=logging.WARNING)
 
 BINANCE_WS   = "wss://stream.binance.com:9443/stream"
+BYBIT_WS     = "wss://stream.bybit.com/v5/public/spot"
 BINANCE_REST = "https://api.binance.com/api/v3"
+BYBIT_REST   = "https://api.bybit.com/v5/market"
 
 # Max candles i RAM per symbol
 MAX_CANDLES = 500
@@ -50,11 +52,43 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _fetch_history(self, symbol: str, interval: str, limit: int = 200):
-        """Henter historisk data fra Binance REST til initial seed."""
+        """Henter historisk data — Bybit først, Binance fallback."""
         import urllib.request
-        url = (f"{BINANCE_REST}/klines?symbol={symbol.upper()}"
-               f"&interval={interval}&limit={limit}")
+
+        # ── Bybit interval mapping ──
+        iv_map = {"1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
+                  "1h":"60","2h":"120","4h":"240","1d":"D"}
+        bybit_iv = iv_map.get(interval, "60")
+
+        # ── Prøv Bybit ──
         try:
+            url = (f"{BYBIT_REST}/kline?category=spot&symbol={symbol.upper()}"
+                   f"&interval={bybit_iv}&limit={limit}")
+            with urllib.request.urlopen(url, timeout=10) as r:
+                data = json.loads(r.read())
+            klines = data.get("result", {}).get("list", [])
+            if klines:
+                with self._lock:
+                    for k in klines:
+                        # Bybit format: [startTime, open, high, low, close, volume, turnover]
+                        ot = int(k[0])
+                        self._candles[symbol][interval][ot] = {
+                            "open_time": ot,
+                            "open":   float(k[1]),
+                            "high":   float(k[2]),
+                            "low":    float(k[3]),
+                            "close":  float(k[4]),
+                            "volume": float(k[5]),
+                            "closed": True,
+                        }
+                return
+        except Exception as e:
+            logging.warning(f"Bybit REST fejl {symbol}: {e}")
+
+        # ── Binance fallback ──
+        try:
+            url = (f"{BINANCE_REST}/klines?symbol={symbol.upper()}"
+                   f"&interval={interval}&limit={limit}")
             with urllib.request.urlopen(url, timeout=10) as r:
                 data = json.loads(r.read())
             with self._lock:
@@ -93,8 +127,16 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _build_stream_url(self, symbols, interval):
+        # Bybit WebSocket for spot klines
         streams = "/".join(f"{s.lower()}@kline_{interval}" for s in symbols)
         return f"{BINANCE_WS}?streams={streams}"
+
+    def _build_bybit_stream_url(self, symbols, interval):
+        iv_map = {"1m":"1","5m":"5","15m":"15","30m":"30",
+                  "1h":"60","4h":"240","1d":"D"}
+        bybit_iv = iv_map.get(interval, "60")
+        topics = [f"kline.{bybit_iv}.{s.upper()}" for s in symbols[:10]]
+        return BYBIT_WS
 
     def _on_message(self, ws, message):
         try:
