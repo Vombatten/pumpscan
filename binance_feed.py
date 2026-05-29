@@ -52,11 +52,76 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _fetch_history(self, symbol: str, interval: str, limit: int = 200):
-        """Seed 1h OHLCV via CoinGecko market_chart — hourly data, 7 dage."""
+        """Seed OHLCV: Bybit → Kraken → CoinGecko fallback."""
         import urllib.request as _ur, json as _js
         from collections import defaultdict
 
         sym_base = symbol.upper().replace("USDT","").replace("USD","")
+        import urllib.request as _ur, json as _js, time as _time
+
+        # ── 1. Bybit (hurtigst, men kan være blokeret) ──
+        try:
+            iv_map = {"1m":"1","5m":"5","15m":"15","30m":"30",
+                      "1h":"60","2h":"120","4h":"240","1d":"D"}
+            url = (f"{BYBIT_REST}/kline?category=spot&symbol={symbol.upper()}"
+                   f"&interval={iv_map.get(interval,'60')}&limit=200")
+            with _ur.urlopen(url, timeout=8) as r:
+                klines = _js.loads(r.read()).get("result",{}).get("list",[])
+            if len(klines) > 10:
+                with self._lock:
+                    for k in klines:
+                        ot = int(k[0])
+                        self._candles[symbol][interval][ot] = {
+                            "open_time":ot,"open":float(k[1]),"high":float(k[2]),
+                            "low":float(k[3]),"close":float(k[4]),
+                            "volume":float(k[5]),"closed":True,
+                        }
+                logging.info(f"Bybit seed OK {symbol}: {len(klines)} bars")
+                return
+        except Exception as e:
+            logging.warning(f"Bybit seed fejl {symbol}: {e}")
+
+        # ── 2. Kraken (rigtige OHLCV, sjældent blokeret) ──
+        kraken_map = {
+            "SOL":"SOLUSD","XRP":"XRPUSD","DOGE":"XDGEUSD","ADA":"ADAUSD",
+            "AVAX":"AVAXUSD","LINK":"LINKUSD","DOT":"DOTUSD","ATOM":"ATOMUSD",
+            "UNI":"UNIUSD","XLM":"XLMUSD","LTC":"XLTCZUSD","BCH":"BCHUSD",
+            "NEAR":"NEARUSD","FIL":"FILUSD","APT":"APTUSD","ARB":"ARBUSD",
+            "OP":"OPUSD","INJ":"INJUSD","SUI":"SUIUSD","AAVE":"AAVEUSD",
+            "MKR":"MKRUSD","CRV":"CRVUSD","SNX":"SNXUSD","SAND":"SANDUSD",
+            "MANA":"MANAUSD","GALA":"GALAUSD","ENJ":"ENJUSD",
+        }
+        sym_base = symbol.upper().replace("USDT","").replace("USD","")
+        kraken_pair = kraken_map.get(sym_base)
+
+        if kraken_pair:
+            try:
+                iv_k = {"1m":"1","5m":"5","15m":"15","30m":"30",
+                        "1h":"60","4h":"240","1d":"1440"}.get(interval,"60")
+                url = f"https://api.kraken.com/0/public/OHLC?pair={kraken_pair}&interval={iv_k}"
+                req = _ur.Request(url, headers={"User-Agent":"PumpScan/1.0"})
+                with _ur.urlopen(req, timeout=12) as r:
+                    data = _js.loads(r.read())
+                pairs = data.get("result",{})
+                key = [k for k in pairs if k != "last"]
+                if key:
+                    ohlcv = pairs[key[0]]
+                    if len(ohlcv) > 10:
+                        with self._lock:
+                            for row in ohlcv:
+                                ot = int(row[0]) * 1000  # Kraken giver sekunder
+                                self._candles[symbol][interval][ot] = {
+                                    "open_time":ot,"open":float(row[1]),
+                                    "high":float(row[2]),"low":float(row[3]),
+                                    "close":float(row[4]),"volume":float(row[6]),
+                                    "closed":True,
+                                }
+                        logging.info(f"Kraken seed OK {symbol}: {len(ohlcv)} bars")
+                        return
+            except Exception as e:
+                logging.warning(f"Kraken seed fejl {symbol}: {e}")
+
+        # ── 3. CoinGecko fallback ──
         cg_map = {
             "SOL":"solana","XRP":"ripple","DOGE":"dogecoin","ADA":"cardano",
             "AVAX":"avalanche-2","SHIB":"shiba-inu","DOT":"polkadot","LTC":"litecoin",
@@ -142,20 +207,25 @@ class BinanceFeed:
             logging.warning(f"Bybit seed fejl {symbol}: {e}")
 
     def _seed_all(self, symbols, interval):
-        """Henter historik for alle symboler parallelt."""
-        threads = []
-        for sym in symbols:
-            t = threading.Thread(
-                target=self._fetch_history,
-                args=(sym, interval),
-                daemon=True,
-            )
-            threads.append(t)
-            t.start()
-            time.sleep(0.05)   # Rate limit
-
-        for t in threads:
-            t.join(timeout=15)
+        """Henter historik sekventielt med pause — undgår CoinGecko rate limit."""
+        batch_size = 5   # Hent 5 ad gangen, pause imellem
+        for i in range(0, len(symbols), batch_size):
+            batch = symbols[i:i+batch_size]
+            threads = []
+            for sym in batch:
+                t = threading.Thread(
+                    target=self._fetch_history,
+                    args=(sym, interval),
+                    daemon=True,
+                )
+                threads.append(t)
+                t.start()
+                time.sleep(0.5)   # 0.5s mellem hvert kald
+            for t in threads:
+                t.join(timeout=20)
+            # Pause mellem batches for at undgå rate limit
+            if i + batch_size < len(symbols):
+                time.sleep(2.0)
 
     # ─────────────────────────────────────────────
     #  WebSocket
