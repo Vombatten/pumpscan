@@ -41,7 +41,7 @@ feed        = None
 seen_sigs   = {}
 
 PARAMS = {
-    "pump_pct":20,"pump_window_h":24,"entry_delay_h":2,
+    "pump_pct":15,"pump_window_h":24,"entry_delay_h":2,
     "stop_loss_pct":5.5,"tp_atr":1.5,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
     "volume_filter":False,"min_pump_candles":2,
@@ -92,8 +92,9 @@ def scan_symbol_live(symbol):
                                   min_candles=PARAMS["min_pump_candles"],
                                   volume_filter=PARAMS["volume_filter"])
         can=max(1,int(PARAMS["pump_window_h"]/ih))
-        # Kig 48 bars tilbage (48 timer på 1h) — ikke kun 8
-        lookback = max(48, dc + can + 4)
+        # Kun kig 6 bars tilbage — signaler skal være friske
+        # Et pump-signal fra 6+ timer siden er ikke længere relevant
+        lookback = can + dc + 2
         for i in range(len(df2)-1, max(len(df2)-lookback, dc+can), -1):
             row,prev=df2.iloc[i],df2.iloc[i-dc]
             if not(pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
