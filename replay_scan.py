@@ -78,12 +78,23 @@ def replay(symbols: list, params: dict, hours: int = 48) -> list:
             arr = df.values
             idx = df.index
 
+            # ── Backtest-præcis position tracking (matcher strategy_pump_dump.py) ──
+            in_trade     = False
+            last_exit_i  = -9999
+            cooldown_c   = max(1, int(72 / ih))   # 72t cooldown som i backtesten
+
             for i in range(max(delay_c, can+1), len(df)):
                 ts = idx[i]
 
                 # Kun signaler inden for replay-vinduet
                 ts_utc = ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
                 if ts_utc < cutoff:
+                    continue
+
+                # Spring over hvis vi er i en aktiv trade eller i cooldown
+                if in_trade:
+                    continue
+                if (i - last_exit_i) < cooldown_c:
                     continue
 
                 pi = i - delay_c
@@ -189,8 +200,13 @@ def replay(symbols: list, params: dict, hours: int = 48) -> list:
                     "duration":    dur_str,
                     "risk_usd":    round(risk_amt, 2),
                     "pos_usd":     round(risk_amt / sl_pct, 0),
-                    "missed":      True,   # Markér som "missed" signal
+                    "missed":      True,
                 })
+
+                # ── Backtest-præcis: sæt cooldown efter exit ──
+                exit_i      = i + hold_candles if outcome != "OPEN" else i + hold_c
+                last_exit_i = exit_i
+                in_trade    = False
 
         except Exception:
             continue
