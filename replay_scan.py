@@ -242,10 +242,17 @@ def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list
             roll_l = df["low"].rolling(can).min().shift(1)
             pump_pct_series = ((roll_h - roll_l) / roll_l * 100).fillna(0)
             avg_vol = df["volume"].rolling(can*2).mean().shift(1)
+            last_sig_ts = None  # Cooldown: kun ét signal per 24 timer per symbol
+
             for i in range(max(delay_c, can+1), len(df)):
                 ts = df.index[i]
                 ts_utc = ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
                 if ts_utc < cutoff:
+                    continue
+
+                # Cooldown — kun ét signal per 24 timer per symbol
+                last = last_sig_ts
+                if last and (ts_utc - last).total_seconds() < 24 * 3600:
                     continue
 
                 pi = i - delay_c
@@ -318,6 +325,7 @@ def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list
                     "pos_usd":     round(risk_amt / sl_pct, 0),
                     "missed":      True,
                 })
+                last_sig_ts = ts_utc  # Cooldown reset
         except Exception:
             continue
 
