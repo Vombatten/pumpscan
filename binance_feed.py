@@ -52,7 +52,7 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _fetch_history(self, symbol: str, interval: str, limit: int = 200):
-        """Seed historisk OHLCV via CoinGecko /ohlc (rigtige high/low/open/close)."""
+        """Seed 1h OHLCV via CoinGecko market_chart — hourly data, 7 dage."""
         import urllib.request as _ur, json as _js
         from collections import defaultdict
 
@@ -77,8 +77,8 @@ class BinanceFeed:
         cg_id = cg_map.get(sym_base, sym_base.lower())
 
         try:
-            url = (f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc"
-                   f"?vs_currency=usd&days=14")
+            url = (f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
+                   f"?vs_currency=usd&days=7&interval=hourly")
             req = _ur.Request(url, headers={"User-Agent": "PumpScan/1.0"})
             with _ur.urlopen(req, timeout=15) as r:
                 data = _js.loads(r.read())
