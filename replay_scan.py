@@ -268,10 +268,10 @@ def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list
                     entry_price = ep,
                     pump_high   = roll_hi_v,
                     atr         = row["atr_v"],
-                    avg_volume  = avg_vol.iloc[pi] if not pd.isna(avg_vol.iloc[pi]) else 1,
-                    pump_volume = df["volume"].iloc[pi],
+                    avg_volume  = 1.0,   # Volume ikke pålidelig fra CoinGecko
+                    pump_volume = 2.0,   # Fast vol_spike=2 → 1pt altid
                 )
-                if grade_info["grade"] != "A":
+                if grade_info["grade"] == "C":  # Skip kun C, vis A+B
                     continue
 
                 sl_price = ep * (1 + sl_pct)
