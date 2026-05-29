@@ -115,8 +115,11 @@ def scan_symbol_live(symbol):
                 avg_volume=avg_vol if not pd.isna(avg_vol) else 1,
                 pump_volume=pump_vol,
             )
-            if g["grade"] != "A": continue  # Kun A-grade
-            kf=calc_kelly(STATS); ru=PARAMS["capital"]*kf
+            if g["grade"] == "C": continue  # Skip C-setups, vis A og B
+            # Dynamisk sizing: A=7%, B=5% af kapital
+            grade_risk = {"A":0.07,"B":0.05}.get(g["grade"],0.05)
+            ru = PARAMS["capital"] * grade_risk
+            kf = grade_risk
             now=datetime.now(timezone.utc)
             ts=df2.index[i].isoformat()
             key=f"{symbol}_{ts[:13]}"
@@ -133,7 +136,7 @@ def scan_symbol_live(symbol):
                 "kelly_pct":round(kf*100,2),"risk_usd":round(ru,0),
                 "pos_usd":round(ru/(PARAMS["stop_loss_pct"]/100),0),
                 "ts":ts,
-                "grade":g["grade"],"grade_score":g["score"],
+                "grade":g["grade"],"grade_score":g["score"],"grade_risk":grade_risk,
                 "cur_price":round(feed.last_price(symbol) or ep,6),
             }
             # Tilføj live distance info
@@ -509,6 +512,10 @@ border-radius:50%;animation:rot .7s linear infinite}
 @keyframes rot{to{transform:rotate(360deg)}}
 .stxt{font-size:12px;color:var(--txt3);font-family:var(--mono);text-align:center;line-height:1.6}
 
+.grade-badge{display:inline-flex;align-items:center;justify-content:center;
+  width:24px;height:24px;border-radius:6px;font-size:11px;font-weight:900;margin-left:4px}
+.grade-a{background:rgba(0,214,143,.15);color:var(--g);border:1px solid rgba(0,214,143,.3)}
+.grade-b{background:rgba(247,183,49,.15);color:var(--y);border:1px solid rgba(247,183,49,.3)}
 .take-row{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--bdr);background:rgba(0,0,0,.15)}
 .take-lbl{font-size:12px;font-weight:700;color:var(--txt2);flex:1}
 .take-toggle{display:flex;gap:6px}
@@ -844,6 +851,7 @@ function renderSigCard(s){
   s.dist_sl_pct= s.dist_sl_pct ?? null;
   const pc=s.pump_size>60?'big':'';
   const nb=s.is_new?'<span class="tag t-new">● NY</span>':'';
+  const gradeBadge=s.grade?`<span class="grade-badge grade-${(s.grade||'b').toLowerCase()}">${s.grade}</span>`:'';
   const wb=s.dist_tp_pct!=null?'<span class="tag t-watch">● Live</span>':'';
   const taken = !!s.taken;
   const outcome = s.effective_outcome||s.outcome||s.manual_outcome||null;
@@ -864,7 +872,7 @@ function renderSigCard(s){
   </div>`:''}`;
   const footLeft = outcome&&s.realized_pnl!=null
     ? `<div><div class="krisk">Realiseret P&L</div><div class="kamt" style="color:${s.realized_pnl>=0?'var(--g)':'var(--r)'}">${s.realized_pnl>=0?'+$'+s.realized_pnl:'$'+s.realized_pnl}</div></div>`
-    : `<div><div class="krisk">Kelly position</div><div class="kamt" style="color:${taken?'var(--g)':'var(--txt3)'}">$${Number(s.pos_usd).toLocaleString()}</div><div class="krisk">risiker $${s.risk_usd}</div></div>`;
+    : `<div><div class="krisk">${s.grade==='A'?'A-setup · 7%':s.grade==='B'?'B-setup · 5%':'Position'}</div><div class="kamt" style="color:${taken?'var(--g)':'var(--txt3)'}">$${Number(s.pos_usd).toLocaleString()}</div><div class="krisk">risiker $${s.risk_usd}</div></div>`;
   const cur=s.cur_price||s.entry;
   const entry=s.entry,tp=s.tp,sl=s.sl;
   const range=sl-tp;
@@ -878,7 +886,7 @@ function renderSigCard(s){
 <div class="sig-top">
   <div>
     <div class="coin-n">${s.symbol}</div>
-    <div class="tags"><span class="tag t-short">SHORT ▼</span>${nb}${outcomeTag}</div>
+    <div class="tags"><span class="tag t-short">SHORT ▼</span>${nb}${outcomeTag}${gradeBadge}</div>
   </div>
   <div class="pump-r">
     <div class="pump-n ${pc}">+${s.pump_size}%</div>
