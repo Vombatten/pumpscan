@@ -242,8 +242,6 @@ def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list
             roll_l = df["low"].rolling(can).min().shift(1)
             pump_pct_series = ((roll_h - roll_l) / roll_l * 100).fillna(0)
             avg_vol = df["volume"].rolling(can*2).mean().shift(1)
-            vol_ok  = df["volume"] > avg_vol * 1.5
-
             for i in range(max(delay_c, can+1), len(df)):
                 ts = df.index[i]
                 ts_utc = ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
@@ -257,7 +255,6 @@ def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list
                 if pd.isna(row["rsi_v"]) or pd.isna(row["atr_v"]): continue
                 if row["atr_v"] <= 0: continue
                 if not (pump_pct_series.iloc[pi] >= pump_min and
-                        vol_ok.iloc[pi] and
                         row["rsi_v"] < rsi_max and
                         row["close"] < prev["high"]): continue
 
