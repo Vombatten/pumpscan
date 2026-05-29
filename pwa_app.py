@@ -92,9 +92,10 @@ def scan_symbol_live(symbol):
                                   min_candles=PARAMS["min_pump_candles"],
                                   volume_filter=PARAMS["volume_filter"])
         can=max(1,int(PARAMS["pump_window_h"]/ih))
-        # Kun kig 6 bars tilbage — signaler skal være friske
-        # Et pump-signal fra 6+ timer siden er ikke længere relevant
-        lookback = can + dc + 2
+        # Entry er altid entry_delay_h efter pumpen.
+        # Vi kigger kun dc+3 bars tilbage = maks ~5 timer
+        # så entry-prisen altid er frisk og relevant
+        lookback = dc + 3
         for i in range(len(df2)-1, max(len(df2)-lookback, dc+can), -1):
             row,prev=df2.iloc[i],df2.iloc[i-dc]
             if not(pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
