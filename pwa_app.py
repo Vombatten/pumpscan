@@ -12,6 +12,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 try:
     from utils import fetch_top_altcoins, rsi, atr
     from strategy_pump_dump import detect_pumps, interval_to_hours
+    from grade_signal import grade_signal, GRADE_RISK
     import pandas as pd, numpy as np
     SCANNER_OK = True
 except ImportError as e:
@@ -41,7 +42,7 @@ seen_sigs   = {}
 
 PARAMS = {
     "pump_pct":15,"pump_window_h":24,"entry_delay_h":2,
-    "stop_loss_pct":3,"tp_atr":2,"rsi_max":80,
+    "stop_loss_pct":8,"tp_atr":1.5,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
     "volume_filter":True,"min_pump_candles":2,
     "interval":"1h","capital":100,"top_n":40,
@@ -90,18 +91,31 @@ def scan_symbol_live(symbol):
         df2["pump"]=detect_pumps(df2,PARAMS["pump_pct"],PARAMS["pump_window_h"],ih,
                                   min_candles=PARAMS["min_pump_candles"],
                                   volume_filter=PARAMS["volume_filter"])
-        for i in range(len(df2)-1,max(len(df2)-8,dc),-1):
+        can=max(1,int(PARAMS["pump_window_h"]/ih))
+        # Kig 48 bars tilbage (48 timer på 1h) — ikke kun 8
+        lookback = max(48, dc + can + 4)
+        for i in range(len(df2)-1, max(len(df2)-lookback, dc+can), -1):
             row,prev=df2.iloc[i],df2.iloc[i-dc]
             if not(pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
             if not(prev["pump"] and row["rsi_v"]<PARAMS["rsi_max"] and
                    row["close"]<prev["high"]): continue
-            can=max(1,int(PARAMS["pump_window_h"]/ih))
             rl=df2["low"].rolling(can).min().iloc[i-dc]
             rh=df2["high"].rolling(can).max().iloc[i-dc]
-            ps=(rh-rl)/rl*100 if rl>0 else 0
+            if pd.isna(rl) or pd.isna(rh) or rl<=0: continue
+            ps=(rh-rl)/rl*100
             ep=row["close"]*(1+cp/2)
             sl=ep*(1+PARAMS["stop_loss_pct"]/100)
             tp=ep-row["atr_v"]*PARAMS["tp_atr"]
+            # ── Grade check ──
+            avg_vol=df2["volume"].rolling(can*2).mean().iloc[i-dc]
+            pump_vol=df2["volume"].iloc[i-dc]
+            g=grade_signal(
+                pump_pct=ps,rsi=row["rsi_v"],entry_price=ep,
+                pump_high=rh,atr=row["atr_v"],
+                avg_volume=avg_vol if not pd.isna(avg_vol) else 1,
+                pump_volume=pump_vol,
+            )
+            if g["grade"]=="C": continue  # Skip C-setups
             kf=calc_kelly(STATS); ru=PARAMS["capital"]*kf
             now=datetime.now(timezone.utc)
             ts=df2.index[i].isoformat()
@@ -119,6 +133,7 @@ def scan_symbol_live(symbol):
                 "kelly_pct":round(kf*100,2),"risk_usd":round(ru,0),
                 "pos_usd":round(ru/(PARAMS["stop_loss_pct"]/100),0),
                 "ts":ts,
+                "grade":g["grade"],"grade_score":g["score"],
                 "cur_price":round(feed.last_price(symbol) or ep,6),
             }
             # Tilføj live distance info
@@ -499,9 +514,9 @@ border-radius:50%;animation:rot .7s linear infinite}
 .take-toggle{display:flex;gap:6px}
 .take-btn{font-size:11px;font-weight:700;padding:5px 13px;border-radius:8px;border:1px solid;cursor:pointer;font-family:var(--sans);transition:all .15s}
 .take-btn.yes{background:var(--g-dim);color:var(--g);border-color:rgba(0,214,143,.3)}
-.take-btn.yes.active{background:var(--g);color:#000;border-color:var(--g)}
+.take-btn.yes.active{background:var(--g);color:#000;border-color:var(--g);box-shadow:0 0 8px rgba(0,214,143,.3)}
 .take-btn.no{background:rgba(74,85,104,.1);color:var(--txt3);border-color:var(--bdr2)}
-.take-btn.no.active{background:rgba(74,85,104,.25);color:var(--txt2)}
+.take-btn.no.active{background:#2a3444;color:var(--txt);border-color:var(--txt3);font-weight:800}
 .outcome-row{display:flex;align-items:center;gap:7px;padding:9px 16px;background:rgba(0,0,0,.12);flex-wrap:wrap}
 .outcome-lbl{font-size:11px;color:var(--txt3);flex:1;min-width:100px}
 .out-btn{font-size:10px;font-weight:700;padding:4px 11px;border-radius:6px;border:1px solid;cursor:pointer;font-family:var(--sans);transition:all .15s}
@@ -737,8 +752,14 @@ async function save(){
 }
 
 async function setTaken(key, taken){
-  await fetch('/api/take/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taken})});
-  setTimeout(load,400);
+  try{
+    const r = await fetch('/api/take/'+key,{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({taken})});
+    const d = await r.json();
+    toast(taken ? '✓ Trade markeret som taget' : '✗ Trade markeret som ikke taget');
+  } catch(e){ toast('Fejl: '+e.message); }
+  setTimeout(load, 400);
 }
 async function setOutcome(key, outcome){
   await fetch('/api/outcome/'+key,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({outcome})});
@@ -898,7 +919,7 @@ ${takeRow}
 <div class="cfoot">
   ${footLeft}
   <div class="tw">
-    <div class="tseen">set ${s.first_seen}</div>
+    <div class="tseen">set ${s.tracked_at?new Date(s.tracked_at).toLocaleTimeString('da-DK',{hour:'2-digit',minute:'2-digit'}):s.first_seen}</div>
     <div class="tago">${fAge(s.age_h)}</div>
   </div>
 </div></div>`;
