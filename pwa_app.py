@@ -81,76 +81,87 @@ def scan_symbol_live(symbol):
     if not SCANNER_OK or feed is None: return None
     try:
         df = feed.get_ohlcv(symbol, PARAMS["interval"])
-        if df is None or len(df)<30: return None
-        ih=interval_to_hours(PARAMS["interval"])
-        dc=max(1,int(PARAMS["entry_delay_h"]/ih))
-        cp=(PARAMS["fee_pct"]+PARAMS["slippage_pct"])/100
-        df2=df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"})
-        df2["rsi_v"]=rsi(df2["close"],14)
-        df2["atr_v"]=atr(df2,14)
-        df2["pump"]=detect_pumps(df2,PARAMS["pump_pct"],PARAMS["pump_window_h"],ih,
-                                  min_candles=PARAMS["min_pump_candles"],
-                                  volume_filter=PARAMS["volume_filter"])
-        can=max(1,int(PARAMS["pump_window_h"]/ih))
-        # Entry er altid entry_delay_h efter pumpen.
-        # Vi kigger kun dc+3 bars tilbage = maks ~5 timer
-        # så entry-prisen altid er frisk og relevant
-        lookback = dc + 3
-        for i in range(len(df2)-1, max(len(df2)-lookback, dc+can), -1):
-            row,prev=df2.iloc[i],df2.iloc[i-dc]
-            if not(pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
-            if not(prev["pump"] and row["rsi_v"]<PARAMS["rsi_max"] and
-                   row["close"]<prev["high"]): continue
-            rl=df2["low"].rolling(can).min().iloc[i-dc]
-            rh=df2["high"].rolling(can).max().iloc[i-dc]
-            if pd.isna(rl) or pd.isna(rh) or rl<=0: continue
-            ps=(rh-rl)/rl*100
-            ep=row["close"]*(1+cp/2)
-            sl=ep*(1+PARAMS["stop_loss_pct"]/100)
-            tp=ep-row["atr_v"]*PARAMS["tp_atr"]
-            # ── Grade check ──
-            avg_vol=df2["volume"].rolling(can*2).mean().iloc[i-dc]
-            pump_vol=df2["volume"].iloc[i-dc]
-            g=grade_signal(
-                pump_pct=ps,rsi=row["rsi_v"],entry_price=ep,
-                pump_high=rh,atr=row["atr_v"],
-                avg_volume=avg_vol if not pd.isna(avg_vol) else 1,
-                pump_volume=pump_vol,
+        if df is None or len(df) < 30: return None
+
+        ih = interval_to_hours(PARAMS["interval"])
+        dc = max(1, int(PARAMS["entry_delay_h"] / ih))
+        cp = (PARAMS["fee_pct"] + PARAMS["slippage_pct"]) / 100
+
+        df2 = df.rename(columns={"Open":"open","High":"high",
+                                  "Low":"low","Close":"close","Volume":"volume"})
+        df2["rsi_v"] = rsi(df2["close"], 14)
+        df2["atr_v"] = atr(df2, 14)
+        df2["pump"]  = detect_pumps(
+            df2, PARAMS["pump_pct"], PARAMS["pump_window_h"], ih,
+            min_candles=PARAMS["min_pump_candles"],
+            volume_filter=PARAMS["volume_filter"],
+        )
+
+        # Kig kun de seneste dc+3 bars — entry skal være frisk
+        for i in range(len(df2)-1, max(len(df2)-(dc+3), dc), -1):
+            row  = df2.iloc[i]
+            prev = df2.iloc[i - dc]
+            if not (pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
+            if not (prev["pump"] and row["rsi_v"] < PARAMS["rsi_max"]
+                    and row["close"] < prev["high"]): continue
+
+            can = max(1, int(PARAMS["pump_window_h"] / ih))
+            rl  = df2["low"].rolling(can).min().iloc[i-dc]
+            rh  = df2["high"].rolling(can).max().iloc[i-dc]
+            if pd.isna(rl) or pd.isna(rh) or rl <= 0: continue
+            ps  = (rh - rl) / rl * 100
+
+            ep  = row["close"] * (1 + cp/2)
+            sl  = ep * (1 + PARAMS["stop_loss_pct"] / 100)
+            tp  = ep - row["atr_v"] * PARAMS["tp_atr"]
+            if tp >= ep: continue  # TP skal være under entry for short
+
+            # Grade check
+            avg_vol  = df2["volume"].rolling(can*2).mean().iloc[i-dc]
+            pump_vol = df2["volume"].iloc[i-dc]
+            g = grade_signal(
+                pump_pct    = ps,
+                rsi         = row["rsi_v"],
+                entry_price = ep,
+                pump_high   = rh,
+                atr         = row["atr_v"],
+                avg_volume  = avg_vol if not pd.isna(avg_vol) else 1,
+                pump_volume = pump_vol,
             )
-            if g["grade"] != "A": continue  # Kun A-grade — verificeret bedst
-            # Dynamisk sizing: A=7%, B=5% af kapital
-            grade_risk = {"A":0.07,"B":0.05}.get(g["grade"],0.05)
-            ru = PARAMS["capital"] * grade_risk
-            kf = grade_risk
-            now=datetime.now(timezone.utc)
-            ts=df2.index[i].isoformat()
-            key=f"{symbol}_{ts[:13]}"
-            if key not in seen_sigs: seen_sigs[key]=now
-            first=seen_sigs[key]
-            age_h=round((now-first).total_seconds()/3600,2)
-            sig={
-                "symbol":symbol.replace("USDT",""),"symbol_full":symbol,
-                "entry":round(ep,6),"sl":round(sl,6),"tp":round(tp,6),
-                "sl_pct":PARAMS["stop_loss_pct"],"tp_pct":round((ep-tp)/ep*100,1),
-                "pump_size":round(ps,1),"rsi":round(row["rsi_v"],1),
-                "age_h":age_h,"is_new":age_h<0.25,
-                "first_seen":first.strftime("%H:%M"),
-                "kelly_pct":round(kf*100,2),"risk_usd":round(ru,0),
-                "pos_usd":round(ru/(PARAMS["stop_loss_pct"]/100),0),
-                "ts":ts,
-                "grade":g["grade"],"grade_score":g["score"],"grade_risk":grade_risk,
-                "cur_price":round(feed.last_price(symbol) or ep,6),
+            if g["grade"] != "A": continue
+
+            kf  = calc_kelly(STATS)
+            ru  = PARAMS["capital"] * kf
+            now = datetime.now(timezone.utc)
+            ts  = df2.index[i].isoformat()
+            key = f"{symbol}_{ts[:13]}"
+            if key not in seen_sigs: seen_sigs[key] = now
+            first = seen_sigs[key]
+            age_h = round((now - first).total_seconds() / 3600, 2)
+
+            return {
+                "symbol":      symbol.replace("USDT",""),
+                "symbol_full": symbol,
+                "entry":       round(ep, 6),
+                "sl":          round(sl, 6),
+                "tp":          round(tp, 6),
+                "sl_pct":      PARAMS["stop_loss_pct"],
+                "tp_pct":      round((ep - tp) / ep * 100, 1),
+                "pump_size":   round(ps, 1),
+                "rsi":         round(row["rsi_v"], 1),
+                "age_h":       age_h,
+                "is_new":      age_h < 0.25,
+                "first_seen":  first.strftime("%H:%M"),
+                "kelly_pct":   round(kf * 100, 2),
+                "risk_usd":    round(ru, 0),
+                "pos_usd":     round(ru / (PARAMS["stop_loss_pct"] / 100), 0),
+                "ts":          ts,
+                "grade":       g["grade"],
+                "grade_score": g["score"],
+                "cur_price":   round(feed.last_price(symbol) or ep, 6),
             }
-            # Tilføj live distance info
-            cur=sig["cur_price"]
-            sig["cur_pct"]=round((ep-cur)/ep*100,2)
-            sig["dist_tp_pct"]=round((cur-tp)/ep*100,2)
-            sig["dist_sl_pct"]=round((sl-cur)/ep*100,2)
-            sig["bar_pos"]=round(max(2,min(96,(ep-cur)/(ep-sl)*100)),1)
-            # Registrer i tracker
-            if tracker: tracker.add_signal(sig)
-            return sig
-    except Exception: return None
+    except Exception:
+        return None
 
 def run_scan():
     global state
@@ -161,7 +172,24 @@ def run_scan():
         state["n_symbols"]=len(syms)
         for sym in syms:
             sig=scan_symbol_live(sym)
-            if sig: sigs.append(sig)
+            if sig:
+                # Tracker-integration sker her — ikke i scan_symbol_live
+                # Tilføj live distance til signal
+                cur = feed.last_price(sig["symbol_full"]) or sig["entry"]
+                ep  = sig["entry"]
+                sl  = sig["sl"]
+                tp  = sig["tp"]
+                sig["cur_price"]    = round(cur, 6)
+                sig["cur_pct"]      = round((ep - cur) / ep * 100, 2)
+                sig["dist_tp_pct"]  = round((cur - tp) / ep * 100, 2)
+                sig["dist_sl_pct"]  = round((sl - cur) / ep * 100, 2)
+                rng = sl - tp
+                sig["bar_pos"]      = round(max(2, min(96, (sl-ep)/rng*100)), 1) if rng > 0 else 50
+                sig["cur_pos"]      = round(max(2, min(97, (sl-cur)/rng*100)), 1) if rng > 0 else 50
+                # Gem i tracker
+                if tracker:
+                    tracker.add_signal(sig)
+                sigs.append(sig)
         sigs.sort(key=lambda x:x["pump_size"],reverse=True)
         state["signals"]=sigs
         state["last_scan"]=datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
@@ -190,14 +218,18 @@ def icon(size): return Response(_icon(size),mimetype="image/png")
 
 @app.route("/api/signals")
 def api_signals():
-    tr_stats=tracker.stats() if tracker else {}
-    active  =tracker.get_active() if tracker else []
+    tr_stats = tracker.stats() if tracker else {}
+    active   = tracker.get_active() if tracker else []
+    recent   = tracker.get_closed(n=10) if tracker else []
     return jsonify({
         **state,
-        "params":PARAMS,"kelly_pct":round(calc_kelly(STATS)*100,2),
-        "capital":PARAMS["capital"],
-        "tracker_stats":tr_stats,"active_signals_taken":[s for s in (tracker.get_active() if tracker else []) if s.get("taken")],"active_signals_all":tracker.get_active() if tracker else [],
-        "active_signals":active,"active_signals_all":active,
+        "params":           PARAMS,
+        "kelly_pct":        round(calc_kelly(STATS)*100, 2),
+        "capital":          PARAMS["capital"],
+        "tracker_stats":    tr_stats,
+        "active_signals":   active,
+        "active_signals_all": active,
+        "recent_closed":    recent,
     })
 
 @app.route("/api/debug")
