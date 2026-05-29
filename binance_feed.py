@@ -52,7 +52,7 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _fetch_history(self, symbol: str, interval: str, limit: int = 200):
-        """Seed historisk data via CoinGecko (virker fra Railway EU)."""
+        """Seed historisk OHLCV via CoinGecko /ohlc (rigtige high/low/open/close)."""
         import urllib.request as _ur, json as _js
         from collections import defaultdict
 
@@ -77,39 +77,30 @@ class BinanceFeed:
         cg_id = cg_map.get(sym_base, sym_base.lower())
 
         try:
-            url = (f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
-                   f"?vs_currency=usd&days=8&interval=hourly")
+            url = (f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc"
+                   f"?vs_currency=usd&days=14")
             req = _ur.Request(url, headers={"User-Agent": "PumpScan/1.0"})
             with _ur.urlopen(req, timeout=15) as r:
                 data = _js.loads(r.read())
 
-            prices  = data.get("prices", [])
-            volumes = data.get("total_volumes", [])
-            if len(prices) < 10:
-                raise ValueError(f"For lidt data: {len(prices)} punkter")
-
-            # Gruppér i 1-times buckets
-            hourly_p = defaultdict(list)
-            for ts_ms, price in prices:
-                hourly_p[(ts_ms // 3_600_000) * 3_600_000].append(price)
-
-            vol_d = {}
-            for ts_ms, vol in volumes:
-                vol_d[(ts_ms // 3_600_000) * 3_600_000] = vol / 24
+            # OHLC format: [[timestamp, open, high, low, close], ...]
+            ohlc = data if isinstance(data, list) else []
+            if len(ohlc) < 10:
+                raise ValueError(f"For lidt OHLC data: {len(ohlc)}")
 
             with self._lock:
-                for hour_ms in sorted(hourly_p.keys()):
-                    pts = hourly_p[hour_ms]
-                    self._candles[symbol][interval][hour_ms] = {
-                        "open_time": hour_ms,
-                        "open":   pts[0],
-                        "high":   max(pts),
-                        "low":    min(pts),
-                        "close":  pts[-1],
-                        "volume": vol_d.get(hour_ms, 1.0),
+                for row in ohlc:
+                    ot = int(row[0])
+                    self._candles[symbol][interval][ot] = {
+                        "open_time": ot,
+                        "open":   float(row[1]),
+                        "high":   float(row[2]),
+                        "low":    float(row[3]),
+                        "close":  float(row[4]),
+                        "volume": 1.0,   # Volume ikke tilgængelig fra OHLC endpoint
                         "closed": True,
                     }
-            logging.info(f"CoinGecko seed OK {symbol}: {len(hourly_p)} bars")
+            logging.info(f"CoinGecko OHLC seed OK {symbol}: {len(ohlc)} bars")
             return
 
         except Exception as e:
