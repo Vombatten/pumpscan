@@ -23,8 +23,8 @@ def grade_signal(pump_pct, rsi, entry_price, pump_high,
     score = 0
 
     # 1. Pump størrelse (moderat = bedst)
-    if 15 <= pump_pct < 40:   s_pump = 2
-    elif 40 <= pump_pct < 60: s_pump = 1
+    if 20 <= pump_pct < 35:   s_pump = 2
+    elif 35 <= pump_pct < 60: s_pump = 1
     else:                      s_pump = 0
     score += s_pump
 
@@ -56,8 +56,8 @@ def grade_signal(pump_pct, rsi, entry_price, pump_high,
     score += s_atr
 
     # Grade
-    if score >= 6:   grade = "A"
-    elif score >= 3: grade = "B"
+    if score >= 8:   grade = "A"
+    elif score >= 5: grade = "B"
     else:            grade = "C"
 
     return {
