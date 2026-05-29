@@ -313,10 +313,9 @@ class SignalTracker:
                         round((sl-cur)/entry*100,2) if entry else 0,
                         round((entry-cur)/entry*100,2) if entry else 0,
                     )
-                    # Auto-close KUN hvis:
-                    # 1. Trade er markeret som "taget"
-                    # 2. Ikke allerede manuelt sat
-                    if sig.get("taken") and not sig.get("manual_outcome"):
+                    # Auto-close når TP eller SL rammes — tagne OG utagne
+                    # (stats tæller kun tagne, men outcome registreres for alle)
+                    if not sig.get("manual_outcome") and not sig.get("outcome"):
                         if cur <= tp:
                             self._close_auto(key,"WIN", tp, capital)
                         elif cur >= sl:
