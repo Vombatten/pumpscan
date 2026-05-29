@@ -88,16 +88,32 @@ class BinanceFeed:
             if len(ohlc) < 10:
                 raise ValueError(f"For lidt OHLC data: {len(ohlc)}")
 
+            # Hent volume fra market_chart
+            vol_dict = {}
+            try:
+                url_v = (f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
+                         f"?vs_currency=usd&days=14")
+                req_v = _ur.Request(url_v, headers={"User-Agent":"PumpScan/1.0"})
+                with _ur.urlopen(req_v, timeout=10) as rv:
+                    mc = _js.loads(rv.read())
+                for ts_ms, vol in mc.get("total_volumes", []):
+                    # Match til nærmeste 4h bucket
+                    b = (ts_ms // (4*3_600_000)) * (4*3_600_000)
+                    vol_dict[b] = vol / 6
+            except Exception:
+                pass
+
             with self._lock:
                 for row in ohlc:
                     ot = int(row[0])
+                    b4h = (ot // (4*3_600_000)) * (4*3_600_000)
                     self._candles[symbol][interval][ot] = {
                         "open_time": ot,
                         "open":   float(row[1]),
                         "high":   float(row[2]),
                         "low":    float(row[3]),
                         "close":  float(row[4]),
-                        "volume": 1.0,   # Volume ikke tilgængelig fra OHLC endpoint
+                        "volume": vol_dict.get(b4h, vol_dict.get(ot, 1.0)),
                         "closed": True,
                     }
             logging.info(f"CoinGecko OHLC seed OK {symbol}: {len(ohlc)} bars")
