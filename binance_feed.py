@@ -52,59 +52,87 @@ class BinanceFeed:
     # ─────────────────────────────────────────────
 
     def _fetch_history(self, symbol: str, interval: str, limit: int = 200):
-        """Henter historisk data — Bybit først, Binance fallback."""
-        import urllib.request
+        """Seed historisk data via CoinGecko (virker fra Railway EU)."""
+        import urllib.request as _ur, json as _js
+        from collections import defaultdict
 
-        # ── Bybit interval mapping ──
-        iv_map = {"1m":"1","3m":"3","5m":"5","15m":"15","30m":"30",
-                  "1h":"60","2h":"120","4h":"240","1d":"D"}
-        bybit_iv = iv_map.get(interval, "60")
+        sym_base = symbol.upper().replace("USDT","").replace("USD","")
+        cg_map = {
+            "SOL":"solana","XRP":"ripple","DOGE":"dogecoin","ADA":"cardano",
+            "AVAX":"avalanche-2","SHIB":"shiba-inu","DOT":"polkadot","LTC":"litecoin",
+            "LINK":"chainlink","MATIC":"matic-network","UNI":"uniswap","ATOM":"cosmos",
+            "XLM":"stellar","ETC":"ethereum-classic","BCH":"bitcoin-cash",
+            "FIL":"filecoin","APT":"aptos","ARB":"arbitrum","OP":"optimism",
+            "INJ":"injective-protocol","SUI":"sui","SEI":"sei-network",
+            "TIA":"celestia","WLD":"worldcoin-wld","FET":"fetch-ai",
+            "RENDER":"render-token","RUNE":"thorchain","ICP":"internet-computer",
+            "AAVE":"aave","SNX":"synthetix-network-token","CRV":"curve-dao-token",
+            "MKR":"maker","COMP":"compound-governance-token","SUSHI":"sushi",
+            "GALA":"gala","SAND":"the-sandbox","MANA":"decentraland",
+            "ENJ":"enjincoin","NEAR":"near","HYPE":"hyperliquid",
+            "ONDO":"ondo-finance","GENIUS":"geniusai","HBAR":"hedera-hashgraph",
+            "VET":"vechain","ALGO":"algorand","EOS":"eos","XTZ":"tezos",
+            "THETA":"theta-token","AXS":"axie-infinity","CHZ":"chiliz",
+        }
+        cg_id = cg_map.get(sym_base, sym_base.lower())
 
-        # ── Prøv Bybit ──
         try:
-            url = (f"{BYBIT_REST}/kline?category=spot&symbol={symbol.upper()}"
-                   f"&interval={bybit_iv}&limit={limit}")
-            with urllib.request.urlopen(url, timeout=10) as r:
-                data = json.loads(r.read())
-            klines = data.get("result", {}).get("list", [])
-            if klines:
-                with self._lock:
-                    for k in klines:
-                        # Bybit format: [startTime, open, high, low, close, volume, turnover]
-                        ot = int(k[0])
-                        self._candles[symbol][interval][ot] = {
-                            "open_time": ot,
-                            "open":   float(k[1]),
-                            "high":   float(k[2]),
-                            "low":    float(k[3]),
-                            "close":  float(k[4]),
-                            "volume": float(k[5]),
-                            "closed": True,
-                        }
-                return
-        except Exception as e:
-            logging.warning(f"Bybit REST fejl {symbol}: {e}")
+            url = (f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
+                   f"?vs_currency=usd&days=8&interval=hourly")
+            req = _ur.Request(url, headers={"User-Agent": "PumpScan/1.0"})
+            with _ur.urlopen(req, timeout=15) as r:
+                data = _js.loads(r.read())
 
-        # ── Binance fallback ──
-        try:
-            url = (f"{BINANCE_REST}/klines?symbol={symbol.upper()}"
-                   f"&interval={interval}&limit={limit}")
-            with urllib.request.urlopen(url, timeout=10) as r:
-                data = json.loads(r.read())
+            prices  = data.get("prices", [])
+            volumes = data.get("total_volumes", [])
+            if len(prices) < 10:
+                raise ValueError(f"For lidt data: {len(prices)} punkter")
+
+            # Gruppér i 1-times buckets
+            hourly_p = defaultdict(list)
+            for ts_ms, price in prices:
+                hourly_p[(ts_ms // 3_600_000) * 3_600_000].append(price)
+
+            vol_d = {}
+            for ts_ms, vol in volumes:
+                vol_d[(ts_ms // 3_600_000) * 3_600_000] = vol / 24
+
             with self._lock:
-                for k in data:
-                    ot = int(k[0])
-                    self._candles[symbol][interval][ot] = {
-                        "open_time": ot,
-                        "open":   float(k[1]),
-                        "high":   float(k[2]),
-                        "low":    float(k[3]),
-                        "close":  float(k[4]),
-                        "volume": float(k[5]),
+                for hour_ms in sorted(hourly_p.keys()):
+                    pts = hourly_p[hour_ms]
+                    self._candles[symbol][interval][hour_ms] = {
+                        "open_time": hour_ms,
+                        "open":   pts[0],
+                        "high":   max(pts),
+                        "low":    min(pts),
+                        "close":  pts[-1],
+                        "volume": vol_d.get(hour_ms, 1.0),
                         "closed": True,
                     }
+            logging.info(f"CoinGecko seed OK {symbol}: {len(hourly_p)} bars")
+            return
+
         except Exception as e:
-            logging.warning(f"REST seed fejl {symbol}: {e}")
+            logging.warning(f"CoinGecko seed fejl {symbol} ({cg_id}): {e}")
+
+        # Bybit fallback
+        try:
+            iv_map = {"1m":"1","5m":"5","15m":"15","30m":"30",
+                      "1h":"60","2h":"120","4h":"240","1d":"D"}
+            url = (f"{BYBIT_REST}/kline?category=spot&symbol={symbol.upper()}"
+                   f"&interval={iv_map.get(interval,'60')}&limit={limit}")
+            with _ur.urlopen(url, timeout=10) as r:
+                klines = _js.loads(r.read()).get("result",{}).get("list",[])
+            with self._lock:
+                for k in klines:
+                    ot = int(k[0])
+                    self._candles[symbol][interval][ot] = {
+                        "open_time":ot,"open":float(k[1]),"high":float(k[2]),
+                        "low":float(k[3]),"close":float(k[4]),
+                        "volume":float(k[5]),"closed":True,
+                    }
+        except Exception as e:
+            logging.warning(f"Bybit seed fejl {symbol}: {e}")
 
     def _seed_all(self, symbols, interval):
         """Henter historik for alle symboler parallelt."""
