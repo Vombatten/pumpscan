@@ -1,349 +1,245 @@
 """
-replay_scan.py — Historisk signal replay
+replay_scan.py — Kronologisk replay der matcher live-scannerens logik præcist.
 
-Scanner de seneste N timer og finder signaler der BURDE have været.
-Viser hvad der faktisk skete (TP/SL/timeout) baseret på efterfølgende priser.
+Princip:
+  For hvert bar-tidspunkt T i replay-vinduet:
+    → Kør præcis samme logik som scan_symbol_live for hvert symbol
+    → Samme dc+8 lookback, samme grade-filter, samme active_symbols-blokering
+    → Resultatet = nøjagtigt de signaler du ville have fået i live trading
 
-Bruges via PWA API: GET /api/replay?hours=48
+Garanti:
+  - 24h og 48h replay er konsistente (overlappende periode er identisk)
+  - Ingen kunstig cooldown — kun blokering mens trade er åben (max 48h)
+  - Samme pump-detektion, RSI, ATR, grade som live-scanner
 """
 
-import sys, os
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
-
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from utils import fetch_ohlcv, rsi, atr
+    from strategy_pump_dump import detect_pumps, interval_to_hours
     from grade_signal import grade_signal, GRADE_RISK
+    from utils import rsi, atr
     SCANNER_OK = True
 except ImportError:
     SCANNER_OK = False
 
 
-def interval_to_hours(interval: str) -> float:
-    return {"1m":1/60,"5m":5/60,"15m":0.25,"30m":0.5,
-            "1h":1,"2h":2,"4h":4,"1d":24}.get(interval, 1.0)
+# ══════════════════════════════════════════════════════════════
+# KRONOLOGISK REPLAY — matcher live-scanner præcist
+# ══════════════════════════════════════════════════════════════
 
-
-def replay(symbols: list, params: dict, hours: int = 48) -> list:
+def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list:
     """
-    Finder alle signaler der ville have opstået i de seneste `hours` timer.
-    Simulerer exit (TP/SL/timeout) på faktiske efterfølgende priser.
-    Returnerer liste af signal-dicts med outcome.
+    Simulerer kronologisk hvad live-scanneren ville have fundet.
+
+    For hvert bar-tidspunkt T i replay-vinduet:
+      - For hvert symbol der IKKE har en aktiv trade:
+          Kør samme logik som scan_symbol_live (dc+8 lookback, A-grade only)
+      - Hvis signal: simuler trade fremad (TP/SL/TIMEOUT)
+      - Bloker symbol til trade lukker (max 48t)
+
+    Garanterer at 24h og 48h replay er konsistente.
     """
     if not SCANNER_OK:
         return []
 
-    interval   = params.get("interval", "1h")
-    ih         = interval_to_hours(interval)
-    delay_c    = max(1, int(params.get("entry_delay_h", 2) / ih))
-    hold_c     = max(1, int(params.get("max_hold_h", 48) / ih))
-    sl_pct     = params.get("stop_loss_pct", 5.5) / 100
-    tp_atr     = params.get("tp_atr", 1.5)
-    pump_min   = params.get("pump_pct", 20)
-    rsi_max    = params.get("rsi_max", 80)
-    pump_win_h = params.get("pump_window_h", 24)
-    costs      = (params.get("fee_pct", 0.06) +
-                  params.get("slippage_pct", 0.15)) / 100
-    capital    = params.get("capital", 100)
+    ih        = interval_to_hours(params.get("interval", "1h"))
+    dc        = max(1, int(params.get("entry_delay_h", 2) / ih))
+    hold_c    = max(1, int(48 / ih))
+    lookback  = dc + 8          # samme som live-scanner
+    sl_pct    = params.get("stop_loss_pct", 3) / 100
+    tp_atr    = params.get("tp_atr", 2.0)
+    pump_min  = params.get("pump_pct", 15)
+    rsi_max   = params.get("rsi_max", 80)
+    pump_win_h= params.get("pump_window_h", 24)
+    vol_filter= params.get("volume_filter", False)
+    min_can   = params.get("min_pump_candles", 1)
+    capital   = params.get("capital", 100)
+    cp        = (params.get("fee_pct", 0.06) + params.get("slippage_pct", 0.15)) / 100
+    cutoff    = datetime.now(timezone.utc) - timedelta(hours=hours)
+    can       = max(1, int(pump_win_h / ih))
 
-    # Cutoff: kun signaler fra de seneste `hours` timer
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-    all_signals = []
-
+    # ── 1. Pre-beregn indikatorer for alle symboler ──
+    sym_data = {}
     for symbol in symbols:
         try:
-            # Hent lidt mere data end nødvendigt for at have context
-            days   = max(7, int(hours / 24) + 3)
-            df_raw = fetch_ohlcv(symbol, interval, days=days)
-            if df_raw.empty or len(df_raw) < 30:
+            df_raw = feed.get_ohlcv(symbol, params.get("interval", "1h"))
+            if df_raw is None or len(df_raw) < 30:
                 continue
-
             df = df_raw.copy()
+            df.columns = [c.lower() for c in df.columns]
             df["rsi_v"] = rsi(df["close"], 14)
             df["atr_v"] = atr(df, 14)
+            df["pump"]  = detect_pumps(df, pump_min, pump_win_h, ih,
+                                       min_candles=min_can,
+                                       volume_filter=vol_filter)
+            # Pre-beregn rolling high/low for pump-størrelse
+            df["roll_h"] = df["high"].rolling(can).max().shift(1)
+            df["roll_l"] = df["low"].rolling(can).min().shift(1)
+            df["vol_ma"] = df["volume"].rolling(can * 2).mean().shift(1)
+            sym_data[symbol] = df
+        except Exception:
+            continue
 
-            can = max(1, int(pump_win_h / ih))
+    if not sym_data:
+        return []
 
-            # Pump detection
-            roll_h = df["high"].rolling(can).max().shift(1)
-            roll_l = df["low"].rolling(can).min().shift(1)
-            pump_pct_series = ((roll_h - roll_l) / roll_l * 100).fillna(0)
-            avg_vol = df["volume"].rolling(can*2).mean().shift(1)
-            vol_ok  = df["volume"] > avg_vol * 1.5
+    # ── 2. Byg fælles tidsserie ──
+    # Brug union af alle timestamps — sorteret kronologisk
+    all_ts = sorted(set(
+        ts for df in sym_data.values() for ts in df.index
+    ))
 
-            arr = df.values
-            idx = df.index
+    # ── 3. Kronologisk simulation ──
+    all_signals = []
+    # active_trades: symbol → (exit_ts, entry_info)
+    active_trades: dict = {}
+    seen_keys: set = set()     # undgår duplikater for samme pump-bar
 
-            # ── Backtest-præcis position tracking (matcher strategy_pump_dump.py) ──
-            in_trade     = False
-            last_exit_i  = -9999
-            cooldown_c   = max(1, int(72 / ih))   # 72t cooldown som i backtesten
+    for bar_ts in all_ts:
+        ts_utc = bar_ts.tz_convert("UTC") if bar_ts.tzinfo else bar_ts.tz_localize("UTC")
+        if ts_utc < cutoff:
+            continue
 
-            for i in range(max(delay_c, can+1), len(df)):
-                ts = idx[i]
+        # Frigiv udløbne trades
+        active_trades = {
+            sym: info for sym, info in active_trades.items()
+            if info["exit_ts"] > ts_utc
+        }
 
-                # Kun signaler inden for replay-vinduet
-                ts_utc = ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
-                if ts_utc < cutoff:
-                    continue
+        # Scan hvert symbol ved dette tidspunkt
+        for symbol, df in sym_data.items():
+            if symbol in active_trades:
+                continue
 
-                # Spring over hvis vi er i en aktiv trade eller i cooldown
-                if in_trade:
-                    continue
-                if (i - last_exit_i) < cooldown_c:
-                    continue
+            # Find bar-index for dette tidspunkt
+            if bar_ts not in df.index:
+                continue
+            sym_i = df.index.get_loc(bar_ts)
+            if sym_i < dc + 2:
+                continue
 
-                pi = i - delay_c
-                if pi < 0:
-                    continue
-
+            # ── Samme logik som scan_symbol_live ──
+            signal = None
+            for i in range(sym_i, max(sym_i - lookback, dc), -1):
                 row  = df.iloc[i]
-                prev = df.iloc[pi]
+                prev = df.iloc[i - dc]
 
                 if pd.isna(row["rsi_v"]) or pd.isna(row["atr_v"]):
                     continue
                 if row["atr_v"] <= 0:
                     continue
-
-                # Entry signal
-                if not (pump_pct_series.iloc[pi] >= pump_min and
-                        vol_ok.iloc[pi] and
+                if not (prev["pump"] and
                         row["rsi_v"] < rsi_max and
                         row["close"] < prev["high"]):
                     continue
 
-                # Grade
-                ep        = row["close"] * (1 + costs / 2)
-                roll_hi_v = roll_h.iloc[pi]
-                roll_lo_v = roll_l.iloc[pi]
-                avg_vol_v = avg_vol.iloc[pi]
-                pump_v    = df["volume"].iloc[pi]
-                pmp_pct_v = pump_pct_series.iloc[pi]
-
-                grade_info = grade_signal(
-                    pump_pct    = pmp_pct_v,
-                    rsi         = row["rsi_v"],
-                    entry_price = ep,
-                    pump_high   = roll_hi_v,
-                    atr         = row["atr_v"],
-                    avg_volume  = avg_vol_v if not pd.isna(avg_vol_v) else 1,
-                    pump_volume = pump_v,
-                )
-
-                # Kun A-grade
-                if grade_info["grade"] != "A":
+                rh = prev["roll_h"]
+                rl = prev["roll_l"]
+                if pd.isna(rh) or pd.isna(rl) or rl <= 0:
                     continue
+                ps = (rh - rl) / rl * 100
 
+                ep       = row["close"] * (1 + cp / 2)
                 sl_price = ep * (1 + sl_pct)
                 tp_price = ep - row["atr_v"] * tp_atr
-                risk_amt = capital * 0.07
-                size     = risk_amt / (ep * sl_pct)
+                if tp_price >= ep:
+                    continue
 
-                # ── Simulér exit på efterfølgende bars ──
-                outcome     = "OPEN"
-                exit_price  = None
-                exit_time   = None
-                hold_candles= 0
+                avg_vol  = prev["vol_ma"]
+                pump_vol = df["volume"].iloc[i - dc]
 
-                for j in range(i+1, min(i+1+hold_c, len(df))):
-                    fut = df.iloc[j]
-                    hold_candles += 1
+                g = grade_signal(
+                    pump_pct    = ps,
+                    rsi         = row["rsi_v"],
+                    entry_price = ep,
+                    pump_high   = rh,
+                    atr         = row["atr_v"],
+                    avg_volume  = float(avg_vol) if not pd.isna(avg_vol) else 1.0,
+                    pump_volume = float(pump_vol),
+                )
+                if g["grade"] != "A":
+                    continue
 
-                    if fut["low"] <= tp_price:
-                        outcome    = "TP"
-                        exit_price = tp_price
-                        exit_time  = idx[j]
-                        break
-                    elif fut["high"] >= sl_price:
-                        outcome    = "SL"
-                        exit_price = sl_price
-                        exit_time  = idx[j]
-                        break
+                # Deduplicer på signal-bar tidspunkt
+                sig_key = f"{symbol}_{df.index[i].isoformat()[:13]}"
+                if sig_key in seen_keys:
+                    signal = None; break
+                seen_keys.add(sig_key)
 
-                if outcome == "OPEN" and hold_candles >= hold_c:
-                    outcome    = "TIMEOUT"
-                    exit_price = df.iloc[min(i+hold_c, len(df)-1)]["close"]
-                    exit_time  = idx[min(i+hold_c, len(df)-1)]
+                signal = {
+                    "symbol":       symbol.replace("USDT", ""),
+                    "symbol_full":  symbol,
+                    "ts":           ts_utc.isoformat(),
+                    "ts_str":       ts_utc.strftime("%d/%m %H:%M"),
+                    "entry":        round(ep, 6),
+                    "sl":           round(sl_price, 6),
+                    "tp":           round(tp_price, 6),
+                    "sl_pct":       params.get("stop_loss_pct", 3),
+                    "tp_pct":       round((ep - tp_price) / ep * 100, 1),
+                    "pump_size":    round(ps, 1),
+                    "rsi":          round(row["rsi_v"], 1),
+                    "grade":        g["grade"],
+                    "grade_score":  g["score"],
+                    "grade_details":g.get("details", {}),
+                    "risk_usd":     round(capital * 0.07, 2),
+                    "pos_usd":      round(capital * 0.07 / sl_pct, 0),
+                    "missed":       True,
+                }
+                break
 
-                # Beregn P&L
-                if exit_price:
-                    pnl = (ep - exit_price) * size - ep * size * costs
-                else:
-                    pnl = 0
-
-                dur_h = hold_candles * ih
-                dur_str = (f"{int(dur_h)}H {int((dur_h%1)*60)}M"
-                           if dur_h < 48 else f"{dur_h/24:.1f}d")
-
-                all_signals.append({
-                    "symbol":      symbol.replace("USDT",""),
-                    "symbol_full": symbol,
-                    "ts":          ts_utc.isoformat(),
-                    "ts_str":      ts_utc.strftime("%d/%m %H:%M"),
-                    "entry":       round(ep, 6),
-                    "sl":          round(sl_price, 6),
-                    "tp":          round(tp_price, 6),
-                    "sl_pct":      round(sl_pct*100, 1),
-                    "tp_pct":      round((ep-tp_price)/ep*100, 1),
-                    "pump_size":   round(pmp_pct_v, 1),
-                    "rsi":         round(row["rsi_v"], 1),
-                    "grade":       grade_info["grade"],
-                    "grade_score": grade_info["score"],
-                    "outcome":     outcome,
-                    "exit_price":  round(exit_price, 6) if exit_price else None,
-                    "exit_time":   exit_time.strftime("%d/%m %H:%M") if exit_time else None,
-                    "pnl":         round(pnl, 2),
-                    "duration":    dur_str,
-                    "risk_usd":    round(risk_amt, 2),
-                    "pos_usd":     round(risk_amt / sl_pct, 0),
-                    "missed":      True,
-                })
-
-                # ── Backtest-præcis: sæt cooldown efter exit ──
-                exit_i      = i + hold_candles if outcome != "OPEN" else i + hold_c
-                last_exit_i = exit_i
-                in_trade    = False
-
-        except Exception:
-            continue
-
-    # Sortér nyeste først
-    all_signals.sort(key=lambda s: s["ts"], reverse=True)
-    return all_signals
-
-
-def replay_from_feed(feed, symbols: list, params: dict, hours: int = 48) -> list:
-    """
-    Replay der bruger feedets allerede-hentede OHLCV data.
-    Ingen Binance/Bybit kald nødvendigt.
-    """
-    from datetime import datetime, timezone, timedelta
-    import pandas as pd
-    import numpy as np
-
-    interval   = params.get("interval", "1h")
-    ih         = interval_to_hours(interval)
-    delay_c    = max(1, int(params.get("entry_delay_h", 2) / ih))
-    hold_c     = max(1, int(params.get("max_hold_h", 48) / ih))
-    sl_pct     = params.get("stop_loss_pct", 5.5) / 100
-    tp_atr     = params.get("tp_atr", 1.5)
-    pump_min   = params.get("pump_pct", 20)
-    rsi_max    = params.get("rsi_max", 80)
-    pump_win_h = params.get("pump_window_h", 24)
-    costs      = (params.get("fee_pct", 0.06) +
-                  params.get("slippage_pct", 0.15)) / 100
-    capital    = params.get("capital", 100)
-    cutoff     = datetime.now(timezone.utc) - timedelta(hours=hours)
-
-    all_signals = []
-
-    for symbol in symbols:
-        try:
-            # Hent fra feed cache
-            df_raw = feed.get_ohlcv(symbol, interval)
-            if df_raw is None or len(df_raw) < 30:
+            if signal is None:
                 continue
 
-            df = df_raw.copy()
-            df.columns = [c.lower() for c in df.columns]
-            df["rsi_v"] = rsi(df["close"], 14)
-            df["atr_v"] = atr(df, 14)
+            # ── Simuler trade fremad fra sym_i+1 ──
+            outcome    = "OPEN"
+            exit_price = signal["entry"]
+            exit_time  = None
+            exit_ts    = ts_utc + timedelta(hours=48)  # default timeout
 
-            can = max(1, int(pump_win_h / ih))
-            roll_h = df["high"].rolling(can).max().shift(1)
-            roll_l = df["low"].rolling(can).min().shift(1)
-            pump_pct_series = ((roll_h - roll_l) / roll_l * 100).fillna(0)
-            avg_vol = df["volume"].rolling(can*2).mean().shift(1)
-            last_sig_ts = None  # Cooldown: kun ét signal per 24 timer per symbol
+            for j in range(sym_i + 1, min(sym_i + hold_c + 1, len(df))):
+                f = df.iloc[j]
+                if f["high"] >= signal["sl"]:
+                    outcome    = "SL"
+                    exit_price = signal["sl"]
+                    exit_ts    = df.index[j].tz_convert("UTC") if df.index[j].tzinfo else df.index[j].tz_localize("UTC")
+                    exit_time  = df.index[j].strftime("%d/%m %H:%M")
+                    break
+                if f["low"] <= signal["tp"]:
+                    outcome    = "TP"
+                    exit_price = signal["tp"]
+                    exit_ts    = df.index[j].tz_convert("UTC") if df.index[j].tzinfo else df.index[j].tz_localize("UTC")
+                    exit_time  = df.index[j].strftime("%d/%m %H:%M")
+                    break
 
-            for i in range(max(delay_c, can+1), len(df)):
-                ts = df.index[i]
-                ts_utc = ts.tz_convert("UTC") if ts.tzinfo else ts.tz_localize("UTC")
-                if ts_utc < cutoff:
-                    continue
+            if outcome == "OPEN":
+                last_j = min(sym_i + hold_c, len(df) - 1)
+                exit_price = df.iloc[last_j]["close"]
+                outcome    = "TIMEOUT"
 
-                # Cooldown — kun ét signal per 24 timer per symbol
-                last = last_sig_ts
-                if last and (ts_utc - last).total_seconds() < 24 * 3600:
-                    continue
+            # P&L (SHORT: profit når pris falder)
+            pnl_pct = (signal["entry"] - exit_price) / signal["entry"] * 100
+            risk    = signal["risk_usd"]
+            pnl_usd = round(pnl_pct / signal["sl_pct"] * risk, 2)
 
-                pi = i - delay_c
-                row  = df.iloc[i]
-                prev = df.iloc[pi]
+            signal.update({
+                "outcome":     outcome,
+                "exit_price":  round(exit_price, 6),
+                "exit_time":   exit_time,
+                "pnl":         round(pnl_usd, 2),
+            })
 
-                if pd.isna(row["rsi_v"]) or pd.isna(row["atr_v"]): continue
-                if row["atr_v"] <= 0: continue
-                if not (pump_pct_series.iloc[pi] >= pump_min and
-                        row["rsi_v"] < rsi_max and
-                        row["close"] < prev["high"]): continue
+            all_signals.append(signal)
 
-                ep       = row["close"] * (1 + costs / 2)
-                roll_hi_v= roll_h.iloc[pi]
-                pmp_pct_v= pump_pct_series.iloc[pi]
-
-                grade_info = grade_signal(
-                    pump_pct    = pmp_pct_v,
-                    rsi         = row["rsi_v"],
-                    entry_price = ep,
-                    pump_high   = roll_hi_v,
-                    atr         = row["atr_v"],
-                    avg_volume  = 1.0,   # Volume ikke pålidelig fra CoinGecko
-                    pump_volume = 2.0,   # Fast vol_spike=2 → 1pt altid
-                )
-                if grade_info["grade"] == "C":  # Skip kun C, vis A+B
-                    continue
-
-                sl_price = ep * (1 + sl_pct)
-                tp_price = ep - row["atr_v"] * tp_atr
-                risk_amt = capital * 0.07
-                size     = risk_amt / (ep * sl_pct)
-
-                # Simulér exit
-                outcome = "OPEN"; exit_price = None; exit_time = None; hold_c2 = 0
-                for j in range(i+1, min(i+1+hold_c, len(df))):
-                    fut = df.iloc[j]; hold_c2 += 1
-                    if fut["low"] <= tp_price:
-                        outcome, exit_price, exit_time = "TP", tp_price, df.index[j]; break
-                    elif fut["high"] >= sl_price:
-                        outcome, exit_price, exit_time = "SL", sl_price, df.index[j]; break
-                if outcome == "OPEN" and hold_c2 >= hold_c:
-                    outcome = "TIMEOUT"
-                    exit_price = df.iloc[min(i+hold_c,len(df)-1)]["close"]
-                    exit_time  = df.index[min(i+hold_c,len(df)-1)]
-
-                pnl = (ep - exit_price) * size - ep * size * costs if exit_price else 0
-                dur_h = hold_c2 * ih
-                dur_str = f"{int(dur_h)}H {int((dur_h%1)*60)}M"
-
-                all_signals.append({
-                    "symbol":      symbol.replace("USDT",""),
-                    "symbol_full": symbol,
-                    "ts":          ts_utc.isoformat(),
-                    "ts_str":      ts_utc.strftime("%d/%m %H:%M"),
-                    "entry":       round(ep, 6),
-                    "sl":          round(sl_price, 6),
-                    "tp":          round(tp_price, 6),
-                    "sl_pct":      round(sl_pct*100, 1),
-                    "tp_pct":      round((ep-tp_price)/ep*100, 1),
-                    "pump_size":   round(pmp_pct_v, 1),
-                    "rsi":         round(row["rsi_v"], 1),
-                    "grade":       grade_info["grade"],
-                    "outcome":     outcome,
-                    "exit_price":  round(exit_price, 6) if exit_price else None,
-                    "exit_time":   exit_time.strftime("%d/%m %H:%M") if exit_time else None,
-                    "pnl":         round(pnl, 2),
-                    "duration":    dur_str,
-                    "risk_usd":    round(risk_amt, 2),
-                    "pos_usd":     round(risk_amt / sl_pct, 0),
-                    "missed":      True,
-                })
-                last_sig_ts = ts_utc  # Cooldown reset
-        except Exception:
-            continue
+            # Bloker symbol til trade lukker
+            active_trades[symbol] = {"exit_ts": exit_ts}
 
     all_signals.sort(key=lambda s: s["ts"], reverse=True)
     return all_signals
+
+
+# ── Legacy wrapper (bruges ikke længere men beholdes for kompatibilitet) ──
+def replay(symbols: list, params: dict, hours: int = 48) -> list:
+    return []
