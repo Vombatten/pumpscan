@@ -44,7 +44,7 @@ PARAMS = {
     "pump_pct":15,"pump_window_h":24,"entry_delay_h":2,
     "stop_loss_pct":3,"tp_atr":2.0,"rsi_max":80,
     "fee_pct":0.06,"slippage_pct":0.15,
-    "volume_filter":True,"min_pump_candles":2,
+    "volume_filter":False,"min_pump_candles":1,
     "interval":"1h","capital":100,"top_n":40,
 }
 STATS = {"win_rate":0.701,"avg_win":121.0,"avg_loss":190.0}
@@ -98,7 +98,7 @@ def scan_symbol_live(symbol):
         )
 
         # Kig kun de seneste dc+3 bars — entry skal være frisk
-        for i in range(len(df2)-1, max(len(df2)-(dc+3), dc), -1):
+        for i in range(len(df2)-1, max(len(df2)-(dc+8), dc), -1):
             row  = df2.iloc[i]
             prev = df2.iloc[i - dc]
             if not (pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
@@ -128,7 +128,7 @@ def scan_symbol_live(symbol):
                 avg_volume  = avg_vol if not pd.isna(avg_vol) else 1,
                 pump_volume = pump_vol,
             )
-            if g["grade"] != "A": continue
+            if g["grade"] == "C": continue  # Skip kun C, accepter A og B
 
             kf  = calc_kelly(STATS)
             ru  = PARAMS["capital"] * kf
