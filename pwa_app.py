@@ -210,11 +210,16 @@ def run_scan():
     try:
         syms=feed._symbols if feed else []
         state["n_symbols"]=len(syms)
-        # Hent aktive symboler én gang — undgår duplikater per symbol
+        # Hent aktive symboler — bloker kun signaler yngre end 48 timer
         active_symbols = set()
         if tracker:
             try:
-                active_symbols = {s.get("symbol_full") for s in tracker.get_active()}
+                max_hold_h = 48
+                active_symbols = {
+                    s.get("symbol_full")
+                    for s in tracker.get_active()
+                    if s.get("age_h", 999) < max_hold_h
+                }
             except Exception:
                 pass
 
