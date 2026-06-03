@@ -96,6 +96,14 @@ class SignalTracker:
         d["cur_pos"] = round(max(2,min(97,(sl-cur  )/rng*100)),1) if rng>0 else 50
         d["taken"]   = bool(d.get("taken", 0))
 
+        # Parse raw_json og træk grade_details ud
+        try:
+            import json as _json
+            raw = _json.loads(d.get("raw_json") or "{}")
+            d["grade_details"] = raw.get("grade_details", {})
+        except Exception:
+            d["grade_details"] = {}
+
         # Effektivt outcome: auto > manuelt
         d["effective_outcome"] = d.get("outcome") or d.get("manual_outcome")
 
