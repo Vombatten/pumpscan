@@ -48,6 +48,45 @@ PARAMS = {
     "interval":"1h","capital":100,"top_n":40,
 }
 STATS = {"win_rate":0.701,"avg_win":121.0,"avg_loss":190.0}
+# ── Telegram notifikationer ──
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+def send_telegram(sig: dict):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        grade_score = sig.get("grade_score", "?")
+        pump        = sig.get("pump_size", 0)
+        symbol      = sig.get("symbol", "")
+        entry       = sig.get("entry", 0)
+        sl          = sig.get("sl", 0)
+        tp          = sig.get("tp", 0)
+        sl_pct      = sig.get("sl_pct", 0)
+        tp_pct      = sig.get("tp_pct", 0)
+        rsi         = sig.get("rsi", 0)
+        grade       = sig.get("grade", "A")
+
+        msg = (
+            f"🚨 *PumpScan Signal*\n\n"
+            f"*{symbol}* — SHORT ▼\n"
+            f"📈 Pump: +{pump}% | Grade: {grade} ({grade_score}/10)\n"
+            f"📊 RSI: {rsi}\n\n"
+            f"💰 Entry: `${entry}`\n"
+            f"🛑 SL: `${sl}` (+{sl_pct}%)\n"
+            f"✅ TP: `${tp}` (-{tp_pct}%)\n\n"
+            "_web\-production\-c6c3d\.up\.railway\.app_"
+        )
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={
+            "chat_id":    TELEGRAM_CHAT_ID,
+            "text":       msg,
+            "parse_mode": "MarkdownV2",
+        }, timeout=5)
+        logging.info(f"Telegram sendt: {symbol}")
+    except Exception as e:
+        logging.warning(f"Telegram fejl: {e}")
+
 state = {
     "signals":[],"last_scan":None,"scanning":False,
     "error":None,"n_symbols":0,"scan_count":0,
@@ -201,6 +240,7 @@ def run_scan():
                 sig["cur_pos"]      = round(max(2, min(97, (sl-cur)/rng*100)), 1) if rng > 0 else 50
                 if tracker:
                     tracker.add_signal(sig)
+                send_telegram(sig)
                 sigs.append(sig)
         sigs.sort(key=lambda x:x["pump_size"],reverse=True)
         state["signals"]=sigs
