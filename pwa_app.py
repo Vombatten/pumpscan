@@ -3,7 +3,7 @@ pwa_app.py — Pump & Dump Scanner PWA
 Binance WebSocket feed + live signal outcome tracking
 """
 
-import sys, os, time, json, threading, struct, zlib, requests
+import sys, os, time, json, threading, struct, zlib, requests, logging
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request, Response
 
