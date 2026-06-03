@@ -156,8 +156,9 @@ def scan_symbol_live(symbol):
                 "risk_usd":    round(ru, 0),
                 "pos_usd":     round(ru / (PARAMS["stop_loss_pct"] / 100), 0),
                 "ts":          ts,
-                "grade":       g["grade"],
-                "grade_score": g["score"],
+                "grade":        g["grade"],
+                "grade_score":  g["score"],
+                "grade_details": g.get("details", {}),
                 "cur_price":   round(feed.last_price(symbol) or ep, 6),
             }
     except Exception:
@@ -170,11 +171,23 @@ def run_scan():
     try:
         syms=feed._symbols if feed else []
         state["n_symbols"]=len(syms)
+        # Hent aktive symboler én gang — undgår duplikater per symbol
+        active_symbols = set()
+        if tracker:
+            try:
+                active_symbols = {s.get("symbol_full") for s in tracker.get_active()}
+            except Exception:
+                pass
+
+        seen_symbols = set()  # deduplicer inden for samme scan
         for sym in syms:
             sig=scan_symbol_live(sym)
             if sig:
-                # Tracker-integration sker her — ikke i scan_symbol_live
-                # Tilføj live distance til signal
+                sf = sig["symbol_full"]
+                # Skip hvis symbol allerede har åben signal
+                if sf in active_symbols or sf in seen_symbols:
+                    continue
+                seen_symbols.add(sf)
                 cur = feed.last_price(sig["symbol_full"]) or sig["entry"]
                 ep  = sig["entry"]
                 sl  = sig["sl"]
@@ -186,7 +199,6 @@ def run_scan():
                 rng = sl - tp
                 sig["bar_pos"]      = round(max(2, min(96, (sl-ep)/rng*100)), 1) if rng > 0 else 50
                 sig["cur_pos"]      = round(max(2, min(97, (sl-cur)/rng*100)), 1) if rng > 0 else 50
-                # Gem i tracker
                 if tracker:
                     tracker.add_signal(sig)
                 sigs.append(sig)
@@ -550,6 +562,14 @@ border-radius:50%;animation:rot .7s linear infinite}
   width:24px;height:24px;border-radius:6px;font-size:11px;font-weight:900;margin-left:4px}
 .grade-a{background:rgba(0,214,143,.15);color:var(--g);border:1px solid rgba(0,214,143,.3)}
 .grade-b{background:rgba(247,183,49,.15);color:var(--y);border:1px solid rgba(247,183,49,.3)}
+.grade-score{display:inline-flex;align-items:center;gap:3px;font-size:11px;font-family:var(--mono);color:var(--txt2);cursor:default;position:relative;margin-left:5px;}
+.grade-score:hover .grade-tooltip{display:block;}
+.grade-tooltip{display:none;position:absolute;top:24px;left:0;z-index:99;background:#151f2e;border:1px solid #2a3a50;border-radius:8px;padding:10px 13px;min-width:210px;font-size:11px;font-family:var(--mono);white-space:nowrap;box-shadow:0 4px 20px rgba(0,0,0,.7);}
+.gt-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:3px 0;}
+.gt-label{color:#6a8aa0;} .gt-val{color:#4a6070;font-size:10px;}
+.gt-score{font-weight:700;} .gt-ok{color:#00d68f;} .gt-half{color:#f7b731;} .gt-no{color:#ff4757;}
+.gt-div{border-top:1px solid #2a3a50;margin:5px 0;}
+.gt-total{font-weight:700;color:var(--txt);}
 .take-row{display:flex;align-items:center;gap:10px;padding:11px 16px;border-bottom:1px solid var(--bdr);background:rgba(0,0,0,.15)}
 .take-lbl{font-size:12px;font-weight:700;color:var(--txt2);flex:1}
 .take-toggle{display:flex;gap:6px}
@@ -886,6 +906,20 @@ function renderSigCard(s){
   const pc=s.pump_size>60?'big':'';
   const nb=s.is_new?'<span class="tag t-new">● NY</span>':'';
   const gradeBadge=s.grade?`<span class="grade-badge grade-${(s.grade||'b').toLowerCase()}">${s.grade}</span>`:'';
+  // Grade score tooltip
+  const gd=s.grade_details||{};
+  function gtRow(label,val,sc,mx){const col=sc>=mx?'gt-ok':sc>0?'gt-half':'gt-no';return`<div class="gt-row"><span class="gt-label">${label}</span><span class="gt-score ${col}">${sc}/${mx}</span><span class="gt-label" style="color:#4a6070">${val}</span></div>`;}
+  const gradeScore=s.grade_score!=null?`<span class="grade-score">${s.grade_score}/${s.grade_score!=null?10:10}
+    <div class="grade-tooltip">
+      ${gd.pump_pct?gtRow('Pump',gd.pump_pct.value+'%',gd.pump_pct.score,gd.pump_pct.max):''}
+      ${gd.rsi?gtRow('RSI',gd.rsi.value,gd.rsi.score,gd.rsi.max):''}
+      ${gd.vol_spike?gtRow('Volumen',gd.vol_spike.value+'×',gd.vol_spike.score,gd.vol_spike.max):''}
+      ${gd.entry_from_top?gtRow('Entry fra top',gd.entry_from_top.value+'%',gd.entry_from_top.score,gd.entry_from_top.max):''}
+      ${gd.atr_ratio?gtRow('ATR ratio',gd.atr_ratio.value+'%',gd.atr_ratio.score,gd.atr_ratio.max):''}
+      <div class="gt-divider"></div>
+      <div class="gt-row gt-total"><span>Total</span><span class="${s.grade==='A'?'gt-ok':s.grade==='B'?'gt-half':'gt-no'}">${s.grade_score}/10 · ${s.grade}</span></div>
+    </div>
+  </span>`:'';
   const wb=s.dist_tp_pct!=null?'<span class="tag t-watch">● Live</span>':'';
   const taken = !!s.taken;
   const outcome = s.effective_outcome||s.outcome||s.manual_outcome||null;
@@ -920,7 +954,7 @@ function renderSigCard(s){
 <div class="sig-top">
   <div>
     <div class="coin-n">${s.symbol}</div>
-    <div class="tags"><span class="tag t-short">SHORT ▼</span>${nb}${outcomeTag}${gradeBadge}</div>
+    <div class="tags"><span class="tag t-short">SHORT ▼</span>${nb}${outcomeTag}${gradeBadge}${gradeScore}</div>
   </div>
   <div class="pump-r">
     <div class="pump-n ${pc}">+${s.pump_size}%</div>
