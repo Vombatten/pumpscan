@@ -3,7 +3,7 @@ pwa_app.py — Pump & Dump Scanner PWA
 Binance WebSocket feed + live signal outcome tracking
 """
 
-import sys, os, time, json, threading, struct, zlib
+import sys, os, time, json, threading, struct, zlib, requests
 from datetime import datetime, timezone
 from flask import Flask, jsonify, request, Response
 
@@ -200,7 +200,8 @@ def scan_symbol_live(symbol):
                 "grade_details": g.get("details", {}),
                 "cur_price":   round(feed.last_price(symbol) or ep, 6),
             }
-    except Exception:
+    except Exception as e:
+        logging.debug(f"scan_symbol_live {symbol}: {e}")
         return None
 
 def run_scan():
