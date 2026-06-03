@@ -128,7 +128,7 @@ def scan_symbol_live(symbol):
                 avg_volume  = avg_vol if not pd.isna(avg_vol) else 1,
                 pump_volume = pump_vol,
             )
-            if g["grade"] == "C": continue  # Skip kun C, accepter A og B
+            if g["grade"] != "A": continue
 
             kf  = calc_kelly(STATS)
             ru  = PARAMS["capital"] * kf
