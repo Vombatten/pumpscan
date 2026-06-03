@@ -290,6 +290,80 @@ def api_signals():
         "recent_closed":    recent,
     })
 
+
+@app.route("/api/scan_debug")
+def api_scan_debug():
+    """Viser præcis hvilke filtre der blokerer signaler per symbol."""
+    if not SCANNER_OK or feed is None:
+        return jsonify({"error": "Scanner eller feed ikke klar"}), 503
+    results = []
+    syms = list(feed._symbols)[:20]  # test de første 20
+    for symbol in syms:
+        r = {"symbol": symbol, "pass": False, "reason": None}
+        try:
+            df = feed.get_ohlcv(symbol, PARAMS["interval"])
+            if df is None or len(df) < 30:
+                r["reason"] = f"For få bars: {len(df) if df is not None else 0}"; results.append(r); continue
+            ih = interval_to_hours(PARAMS["interval"])
+            dc = max(1, int(PARAMS["entry_delay_h"] / ih))
+            df2 = df.rename(columns={"Open":"open","High":"high","Low":"low","Close":"close","Volume":"volume"})
+            df2["rsi_v"] = rsi(df2["close"], 14)
+            df2["atr_v"] = atr(df2, 14)
+            df2["pump"]  = detect_pumps(df2, PARAMS["pump_pct"], PARAMS["pump_window_h"], ih,
+                                        min_candles=PARAMS["min_pump_candles"],
+                                        volume_filter=PARAMS["volume_filter"])
+            pump_count = int(df2["pump"].sum())
+            r["bars"] = len(df2)
+            r["pump_bars"] = pump_count
+            if pump_count == 0:
+                r["reason"] = "Ingen pump bars (ingen 15%+ bevægelse i 24t)"; results.append(r); continue
+            found = False
+            for i in range(len(df2)-1, max(len(df2)-(dc+8), dc), -1):
+                row  = df2.iloc[i]
+                prev = df2.iloc[i - dc]
+                if not (pd.notna(row["rsi_v"]) and pd.notna(row["atr_v"])): continue
+                if not prev["pump"]:
+                    continue
+                if not (row["rsi_v"] < PARAMS["rsi_max"]):
+                    r["reason"] = f"RSI for høj: {row['rsi_v']:.1f}"; continue
+                if not (row["close"] < prev["high"]):
+                    r["reason"] = f"Close over pump high"; continue
+                can = max(1, int(PARAMS["pump_window_h"] / ih))
+                rh = df2["high"].rolling(can).max().iloc[i-dc]
+                rl = df2["low"].rolling(can).min().iloc[i-dc]
+                ps = (rh - rl) / rl * 100
+                ep = row["close"] * (1 + (PARAMS["fee_pct"]+PARAMS["slippage_pct"])/200)
+                avg_vol  = df2["volume"].rolling(can*2).mean().iloc[i-dc]
+                pump_vol = df2["volume"].iloc[i-dc]
+                g = grade_signal(pump_pct=ps, rsi=row["rsi_v"], entry_price=ep,
+                                 pump_high=rh, atr=row["atr_v"],
+                                 avg_volume=avg_vol if not pd.isna(avg_vol) else 1,
+                                 pump_volume=pump_vol)
+                if g["grade"] != "A":
+                    r["reason"] = f"Grade {g['grade']} ({g['score']}/10) — pump:{ps:.1f}% RSI:{row['rsi_v']:.1f}"
+                    found = True; break
+                r["pass"] = True
+                r["reason"] = f"A-grade ({g['score']}/10) pump:{ps:.1f}%"
+                found = True; break
+            if not found and not r.get("reason"):
+                r["reason"] = f"Ingen bars i lookback med pump=True"
+        except Exception as e:
+            r["reason"] = f"Fejl: {e}"
+        results.append(r)
+    passing  = [x for x in results if x["pass"]]
+    blocking = [x for x in results if not x["pass"]]
+    reasons  = {}
+    for x in blocking:
+        k = (x.get("reason") or "ukendt").split("—")[0].strip()[:50]
+        reasons[k] = reasons.get(k, 0) + 1
+    return jsonify({
+        "tested": len(results),
+        "passing": len(passing),
+        "signals": passing,
+        "top_blockers": sorted(reasons.items(), key=lambda x: -x[1]),
+        "details": results
+    })
+
 @app.route("/api/debug")
 def api_debug():
     """Viser hvad der fejler i scanneren."""
