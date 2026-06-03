@@ -888,6 +888,28 @@ function renderWrCard(ts){
   </div>`;
 }
 
+function buildGradeTooltip(gd, grade, score) {
+  if (!gd || Object.keys(gd).length === 0) return '';
+  var rows = '';
+  var criteria = [
+    ['Pump', gd.pump_pct, '%'],
+    ['RSI', gd.rsi, ''],
+    ['Volumen', gd.vol_spike, '×'],
+    ['Entry fra top', gd.entry_from_top, '%'],
+    ['ATR ratio', gd.atr_ratio, '%']
+  ];
+  criteria.forEach(function(c) {
+    if (!c[1]) return;
+    var col = c[1].score >= c[1].max ? 'gt-ok' : c[1].score > 0 ? 'gt-half' : 'gt-no';
+    rows += '<div class="gt-row"><span class="gt-label">' + c[0] + '</span>';
+    rows += '<span class="gt-score ' + col + '">' + c[1].score + '/' + c[1].max + '</span>';
+    rows += '<span class="gt-val">' + c[1].value + c[2] + '</span></div>';
+  });
+  var tc = grade === 'A' ? 'gt-ok' : grade === 'B' ? 'gt-half' : 'gt-no';
+  rows += '<div class="gt-div"></div>';
+  rows += '<div class="gt-row"><span class="gt-total">Total</span><span class="gt-total ' + tc + '">' + score + '/10 · ' + grade + '</span></div>';
+  return '<div class="grade-tooltip">' + rows + '</div>';
+}
 function renderSigCard(s){
   // Sæt defaults for felter der kan mangle fra tracker
   s.age_h      = s.age_h      ?? 0;
@@ -908,18 +930,8 @@ function renderSigCard(s){
   const gradeBadge=s.grade?`<span class="grade-badge grade-${(s.grade||'b').toLowerCase()}">${s.grade}</span>`:'';
   // Grade score tooltip
   const gd=s.grade_details||{};
-  function gtRow(label,val,sc,mx){const col=sc>=mx?'gt-ok':sc>0?'gt-half':'gt-no';return`<div class="gt-row"><span class="gt-label">${label}</span><span class="gt-score ${col}">${sc}/${mx}</span><span class="gt-label" style="color:#4a6070">${val}</span></div>`;}
-  const gradeScore=s.grade_score!=null?`<span class="grade-score">${s.grade_score}/${s.grade_score!=null?10:10}
-    <div class="grade-tooltip">
-      ${gd.pump_pct?gtRow('Pump',gd.pump_pct.value+'%',gd.pump_pct.score,gd.pump_pct.max):''}
-      ${gd.rsi?gtRow('RSI',gd.rsi.value,gd.rsi.score,gd.rsi.max):''}
-      ${gd.vol_spike?gtRow('Volumen',gd.vol_spike.value+'×',gd.vol_spike.score,gd.vol_spike.max):''}
-      ${gd.entry_from_top?gtRow('Entry fra top',gd.entry_from_top.value+'%',gd.entry_from_top.score,gd.entry_from_top.max):''}
-      ${gd.atr_ratio?gtRow('ATR ratio',gd.atr_ratio.value+'%',gd.atr_ratio.score,gd.atr_ratio.max):''}
-      <div class="gt-divider"></div>
-      <div class="gt-row gt-total"><span>Total</span><span class="${s.grade==='A'?'gt-ok':s.grade==='B'?'gt-half':'gt-no'}">${s.grade_score}/10 · ${s.grade}</span></div>
-    </div>
-  </span>`:'';
+  const tooltip=buildGradeTooltip(gd,s.grade,s.grade_score);
+  const gradeScore=s.grade_score!=null?('<span class="grade-score">'+s.grade_score+'/10'+tooltip+'</span>'):'';
   const wb=s.dist_tp_pct!=null?'<span class="tag t-watch">● Live</span>':'';
   const taken = !!s.taken;
   const outcome = s.effective_outcome||s.outcome||s.manual_outcome||null;
